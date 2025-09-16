@@ -64,6 +64,7 @@ _Poetic aliases planned_: synonyms like `whisper` for comments or `kindly` for f
 let mood be "wistful"
 ```
 - Introduces a new name in the current scope.
+- Bindings obey lexical scope: once execution leaves the current indented block, the name is no longer visible.
 
 ### Reassignment
 ```
@@ -94,6 +95,12 @@ note greet(person):
 ```
 - `halt` exits the routine. If omitted, `nothing` is returned by default.
 - Routines may now be declared inside other routines or blocks for helper logic (escaping closures are on the roadmap).
+- Inner routines capture surrounding bindings, allowing simple closures over local state.
+
+## Scope & Closures
+- Every indented block (`if`, `whilst`, or explicit blocks) creates a new scope chained to its parent.
+- `let` introduces names into the current scope; `set` updates the nearest enclosing binding.
+- Nested `note` declarations capture the environment at definition time so helpers can reference outer variables.
 
 ## Expressions
 - Expression statements evaluate the expression and discard the value unless used in a routine with `halt`.
@@ -104,6 +111,7 @@ note greet(person):
 - `gather <name>` loads each module once, first checking for native runtime bridges, then for a script library at `libs/<name>.ls`. Modules may depend on one another using nested `gather`.
 - The runtime ships with a tiny native `core` module that exposes host bridges (currently `core::write_line`) intended for library authors.
 - The user-facing `io` module lives in `libs/io.ls` and delegates to `core::write_line` to implement `io::echo`.
+- The native `math` module supplies constants and helpers such as `math::pi`, `math::abs`, `math::floor`, and `math::ceil`.
 
 ### Example Script
 ```
@@ -122,7 +130,7 @@ main()
 
 ## Minimal Core vs Libraries
 - Core runtime implements: lexical rules, evaluation, scopes, control flow, routine declaration/invocation, module loader hooks.
-- Libraries provide: math (`math::sin`), IO (`io::echo`), collections, string utilities, etc. The interpreter recognises modules by name and dispatches to registered providers.
+- Libraries provide: numeric helpers (`math::abs`, `math::floor`, `math::ceil`), IO (`io::echo`), collections, string utilities, etc. The interpreter recognises modules by name and dispatches to registered providers.
 
 ## Next Steps
 - Flesh out type annotations syntax (`: number`) once runtime type descriptors exist.
@@ -130,6 +138,6 @@ main()
 - Add pattern matching constructs after loops and functions are fully implemented.
 
 ## Current Implementation Status (alpha)
-- Implemented in the interpreter today: indentation-aware blocks (colon + leading spaces), nested routine declarations, `gather` with native/module loading cache, `let`, `set`, routines (`note` / `halt`), branching (`if` / `otherwise`), looping (`whilst`), expression statements, arithmetic/logic expressions, the `core::write_line` bridge + `io` library, booleans, numbers, strings, `nothing`, `and`/`or`/`not`.
+- Implemented in the interpreter today: indentation-aware blocks (colon + leading spaces), lexical block scopes with capturing routines, `gather` with native/module loading cache, `let`, `set`, routines (`note` / `halt`), branching (`if` / `otherwise`), looping (`whilst`), expression statements, arithmetic/logic expressions, the `core::write_line` bridge plus `io` and `math` libraries, booleans, numbers, strings, `nothing`, `and`/`or`/`not`.
 - Error handling now responds with contextual hints ("Hint:" lines) to guide fixes for common mistakes.
 - Planned next iterations: richer standard modules (`math`, `text`), structured data types, module packaging conventions (including versioning), resilient closures that survive scope exit, and future gradual typing.

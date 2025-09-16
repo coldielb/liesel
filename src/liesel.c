@@ -12,13 +12,13 @@
 #include <sys/types.h>
 
 #define UNUSED(x) (void)(x)
-#define CHECK_ALLOC(ptr)                                         \
-    do {                                                         \
-        if ((ptr) == NULL) {                                     \
-            lie_error_report(LIE_ERROR_SYSTEM, 0, NULL, 0,        \
+#define CHECK_ALLOC(ptr)                     \
+    do {                                         \
+        if ((ptr) == NULL) {                     \
+            lie_error_report(LIE_ERROR_SYSTEM, 0, NULL, 0,\
                              "Out of memory");                  \
-            exit(74);                                            \
-        }                                                        \
+            exit(74);                            \
+        }                                        \
     } while (0)
 
 static char *copy_string(const char *start, size_t length) {
@@ -304,6 +304,12 @@ static Token handle_line_start(Lexer *lexer) {
     }
 
     int current = lexer->indent_stack[lexer->indent_depth - 1];
+    char next = lexer_peek(lexer);
+    if (next == '\n' || next == '\0') {
+        lexer->start = line_start;
+        lexer->at_line_start = false;
+        return make_simple_token(lexer, TOKEN_NEWLINE);
+    }
     if (indent > current) {
         lexer->indent_stack[lexer->indent_depth++] = indent;
         lexer->start = line_start;
@@ -1143,6 +1149,12 @@ typedef struct Interpreter Interpreter;
 
 typedef struct Function Function;
 
+typedef struct Environment Environment;
+
+static Environment *environment_retain(Environment *env);
+static Environment *environment_new(Environment *enclosing);
+static void environment_release(Environment *env);
+
 typedef enum {
     VALUE_NUMBER,
     VALUE_BOOL,
@@ -1183,7 +1195,7 @@ static Function *function_new(FunctionStmt *declaration, struct Environment *clo
     CHECK_ALLOC(fn);
     fn->refcount = 1;
     fn->declaration = declaration;
-    fn->closure = closure;
+    fn->closure = environment_retain(closure);
     return fn;
 }
 
@@ -1250,6 +1262,7 @@ static Value value_copy(Value src) {
 
 static void function_free(Function *function) {
     if (function->refcount <= 0) {
+        environment_release(function->closure);
         free(function);
     }
 }
@@ -1342,30 +1355,46 @@ typedef struct Binding {
     Value value;
 } Binding;
 
-typedef struct Environment {
+struct Environment {
+    int refcount;
     Binding *entries;
     size_t count;
     size_t capacity;
     struct Environment *enclosing;
-} Environment;
+};
 
-static void environment_init(Environment *env, Environment *enclosing) {
+static Environment *environment_retain(Environment *env) {
+    if (env != NULL) {
+        env->refcount++;
+    }
+    return env;
+}
+
+static Environment *environment_new(Environment *enclosing) {
+    Environment *env = (Environment *)calloc(1, sizeof(Environment));
+    CHECK_ALLOC(env);
+    env->refcount = 1;
     env->entries = NULL;
     env->count = 0;
     env->capacity = 0;
-    env->enclosing = enclosing;
+    env->enclosing = enclosing ? environment_retain(enclosing) : NULL;
+    return env;
 }
 
-static void environment_free(Environment *env) {
+static void environment_release(Environment *env) {
+    if (env == NULL) return;
+    env->refcount--;
+    if (env->refcount > 0) {
+        return;
+    }
     for (size_t i = 0; i < env->count; ++i) {
         free(env->entries[i].name);
         value_free(env->entries[i].value);
     }
     free(env->entries);
-    env->entries = NULL;
-    env->count = 0;
-    env->capacity = 0;
-    env->enclosing = NULL;
+    Environment *parent = env->enclosing;
+    free(env);
+    environment_release(parent);
 }
 
 static ssize_t environment_find(Environment *env, const char *name) {
@@ -1518,7 +1547,7 @@ typedef struct {
 } ExecResult;
 
 struct Interpreter {
-    Environment globals;
+    Environment *globals;
     Environment *current;
     bool had_runtime_error;
     int call_depth;
@@ -1542,8 +1571,8 @@ static ExecResult exec_result_value(Value value) {
 }
 
 static void interpreter_init(Interpreter *interp) {
-    environment_init(&interp->globals, NULL);
-    interp->current = &interp->globals;
+    interp->globals = environment_new(NULL);
+    interp->current = interp->globals;
     interp->had_runtime_error = false;
     interp->call_depth = 0;
     string_list_init(&interp->loaded_modules);
@@ -1552,7 +1581,9 @@ static void interpreter_init(Interpreter *interp) {
 }
 
 static void interpreter_free(Interpreter *interp) {
-    environment_free(&interp->globals);
+    environment_release(interp->globals);
+    interp->globals = NULL;
+    interp->current = NULL;
     string_list_free(&interp->loaded_modules);
     string_list_free(&interp->loading_modules);
     program_store_free(&interp->stored_programs);
@@ -1582,9 +1613,8 @@ static int interpret_source(Interpreter *interp, const char *source, bool keep_p
 static Value native_core_write_line(Interpreter *interp, int arg_count, Value *args, int line) {
     UNUSED(interp);
     if (arg_count < 1) {
-        lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
-                         "core::write_line expects at least 1 argument");
-        lie_error_hint("Pass the text you want to display, e.g. core::write_line(""hello"").");
+        runtime_error(interp, line, "core::write_line expects at least 1 argument",
+                      "Pass the text you want to display, e.g. core::write_line(\"hello\").");
         return value_nothing();
     }
     for (int i = 0; i < arg_count; ++i) {
@@ -1599,11 +1629,71 @@ static Value native_core_write_line(Interpreter *interp, int arg_count, Value *a
     return value_nothing();
 }
 
+static Value native_math_abs(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1) {
+        runtime_error(interp, line, "math::abs expects exactly 1 argument",
+                      "Call it like math::abs(number).");
+        return value_nothing();
+    }
+    if (args[0].type != VALUE_NUMBER) {
+        runtime_error(interp, line, "math::abs requires a numeric argument",
+                      "Ensure the value passed to math::abs is a number.");
+        return value_nothing();
+    }
+    return value_number(fabs(args[0].as.number));
+}
+
+static Value native_math_floor(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1) {
+        runtime_error(interp, line, "math::floor expects exactly 1 argument",
+                      "Call it like math::floor(number).");
+        return value_nothing();
+    }
+    if (args[0].type != VALUE_NUMBER) {
+        runtime_error(interp, line, "math::floor requires a numeric argument",
+                      "Ensure the value passed to math::floor is a number.");
+        return value_nothing();
+    }
+    return value_number(floor(args[0].as.number));
+}
+
+static Value native_math_ceil(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1) {
+        runtime_error(interp, line, "math::ceil expects exactly 1 argument",
+                      "Call it like math::ceil(number).");
+        return value_nothing();
+    }
+    if (args[0].type != VALUE_NUMBER) {
+        runtime_error(interp, line, "math::ceil requires a numeric argument",
+                      "Ensure the value passed to math::ceil is a number.");
+        return value_nothing();
+    }
+    return value_number(ceil(args[0].as.number));
+}
+
 static bool load_native_module(Interpreter *interp, const char *name) {
     if (strcmp(name, "core") == 0) {
         Value write = value_native(native_core_write_line, "core::write_line");
-        environment_define(&interp->globals, "core::write_line", write);
+        environment_define(interp->globals, "core::write_line", write);
         value_free(write);
+        return true;
+    } else if (strcmp(name, "math") == 0) {
+        Value pi = value_number(3.14159265358979323846);
+        environment_define(interp->globals, "math::pi", pi);
+        value_free(pi);
+
+        Value abs = value_native(native_math_abs, "math::abs");
+        environment_define(interp->globals, "math::abs", abs);
+        value_free(abs);
+
+        Value floor_fn = value_native(native_math_floor, "math::floor");
+        environment_define(interp->globals, "math::floor", floor_fn);
+        value_free(floor_fn);
+
+        Value ceil_fn = value_native(native_math_ceil, "math::ceil");
+        environment_define(interp->globals, "math::ceil", ceil_fn);
+        value_free(ceil_fn);
+
         return true;
     }
     return false;
@@ -1941,21 +2031,20 @@ static Value eval_call(Interpreter *interp, CallExpr call, int line) {
         Function *function = callee.as.function;
         if (call.arg_count != function->declaration->param_count) {
             runtime_error(interp, line, "Arity mismatch in call",
-                               "The routine '%s' expects %zu argument%s but received %zu.",
-                               function->declaration->name,
-                               function->declaration->param_count,
-                               function->declaration->param_count == 1 ? "" : "s",
-                               call.arg_count);
+                          "The routine '%s' expects %zu argument%s but received %zu.",
+                          function->declaration->name,
+                          function->declaration->param_count,
+                          function->declaration->param_count == 1 ? "" : "s",
+                          call.arg_count);
         } else {
-            Environment local;
-            environment_init(&local, function->closure);
+            Environment *local = environment_new(function->closure);
 
             for (size_t i = 0; i < call.arg_count; ++i) {
-                environment_define(&local, function->declaration->parameters[i], args[i]);
+                environment_define(local, function->declaration->parameters[i], args[i]);
             }
 
             Environment *previous = interp->current;
-            interp->current = &local;
+            interp->current = local;
             interp->call_depth++;
 
             ExecResult exec = execute_block(interp, &function->declaration->body->as.block);
@@ -1969,11 +2058,11 @@ static Value eval_call(Interpreter *interp, CallExpr call, int line) {
                 result = value_nothing();
             }
 
-            environment_free(&local);
+            environment_release(local);
         }
     } else {
         runtime_error(interp, line, "Value is not callable",
-                           "Try adding parentheses to call the value or ensure it refers to a routine.");
+                       "Try adding parentheses to call the value or ensure it refers to a routine.");
     }
 
     for (size_t i = 0; i < call.arg_count; ++i) {
@@ -2091,14 +2180,23 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
 }
 
 static ExecResult execute_block(Interpreter *interp, BlockStmt *block) {
+    Environment *previous = interp->current;
+    Environment *local = environment_new(previous);
+    interp->current = local;
+
+    ExecResult result = exec_result_none();
     for (size_t i = 0; i < block->count; ++i) {
-        ExecResult result = execute_statement(interp, block->statements[i]);
-        if (result.did_return) {
-            return result;
+        result = execute_statement(interp, block->statements[i]);
+        if (result.did_return || interp->had_runtime_error) {
+            break;
         }
-        if (interp->had_runtime_error) {
-            return exec_result_none();
-        }
+    }
+
+    interp->current = previous;
+    environment_release(local);
+
+    if (result.did_return) {
+        return result;
     }
     return exec_result_none();
 }
