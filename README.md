@@ -1,3 +1,7 @@
+<div align=center>
+    <img src="./logo.png">
+</div>
+
 # Liesel
 
 Liesel is a hand-crafted, interpreted language with a lyrical or poetic syntax. This repository houses the interpreter (written in C), a few libraries (authored in Liesel itself), and a growing suite of examples and documentation.
