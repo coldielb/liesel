@@ -65,6 +65,7 @@ let mood be "wistful"
 ```
 - Introduces a new name in the current scope.
 - Bindings obey lexical scope: once execution leaves the current indented block, the name is no longer visible.
+- Modules may export names directly using namespaces (e.g. `let math::pi be ...`).
 
 ### Reassignment
 ```
@@ -111,7 +112,7 @@ note greet(person):
 - `gather <name>` loads each module once, first checking for native runtime bridges, then for a script library at `libs/<name>.ls`. Modules may depend on one another using nested `gather`.
 - The runtime ships with a tiny native `core` module that exposes host bridges (currently `core::write_line`) intended for library authors.
 - The user-facing `io` module lives in `libs/io.ls` and delegates to `core::write_line` to implement `io::echo`.
-- The native `math` module supplies constants and helpers such as `math::pi`, `math::abs`, `math::floor`, and `math::ceil`.
+- The `math` library lives in `libs/math.ls` and supplies constants and helpers such as `math::pi`, `math::abs`, `math::floor`, and `math::ceil`.
 
 ### Example Script
 ```

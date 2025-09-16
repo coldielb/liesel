@@ -912,11 +912,6 @@ static Stmt *parse_let_statement(Parser *parser, Token keyword) {
         return NULL;
     }
     Token name_token = parser_advance(parser);
-    if (identifier_has_namespace(name_token)) {
-        parser_error_at(parser, name_token, "Bindings cannot contain '::'");
-        lie_error_hint("Drop the module prefix here; bind it locally as 'let name be ...'.");
-        return NULL;
-    }
     parser_consume(parser, TOKEN_BE, "Expected 'be' after name");
     Expr *value = parse_expression(parser);
     if (value == NULL) return NULL;
@@ -933,11 +928,6 @@ static Stmt *parse_set_statement(Parser *parser, Token keyword) {
         return NULL;
     }
     Token name_token = parser_advance(parser);
-    if (identifier_has_namespace(name_token)) {
-        parser_error_at(parser, name_token, "Assignments cannot target '::' names");
-        lie_error_hint("Use a simple name that was declared with 'let'.");
-        return NULL;
-    }
     parser_consume(parser, TOKEN_TO, "Expected 'to' after name");
     Expr *value = parse_expression(parser);
     if (value == NULL) return NULL;
@@ -1629,71 +1619,11 @@ static Value native_core_write_line(Interpreter *interp, int arg_count, Value *a
     return value_nothing();
 }
 
-static Value native_math_abs(Interpreter *interp, int arg_count, Value *args, int line) {
-    if (arg_count != 1) {
-        runtime_error(interp, line, "math::abs expects exactly 1 argument",
-                      "Call it like math::abs(number).");
-        return value_nothing();
-    }
-    if (args[0].type != VALUE_NUMBER) {
-        runtime_error(interp, line, "math::abs requires a numeric argument",
-                      "Ensure the value passed to math::abs is a number.");
-        return value_nothing();
-    }
-    return value_number(fabs(args[0].as.number));
-}
-
-static Value native_math_floor(Interpreter *interp, int arg_count, Value *args, int line) {
-    if (arg_count != 1) {
-        runtime_error(interp, line, "math::floor expects exactly 1 argument",
-                      "Call it like math::floor(number).");
-        return value_nothing();
-    }
-    if (args[0].type != VALUE_NUMBER) {
-        runtime_error(interp, line, "math::floor requires a numeric argument",
-                      "Ensure the value passed to math::floor is a number.");
-        return value_nothing();
-    }
-    return value_number(floor(args[0].as.number));
-}
-
-static Value native_math_ceil(Interpreter *interp, int arg_count, Value *args, int line) {
-    if (arg_count != 1) {
-        runtime_error(interp, line, "math::ceil expects exactly 1 argument",
-                      "Call it like math::ceil(number).");
-        return value_nothing();
-    }
-    if (args[0].type != VALUE_NUMBER) {
-        runtime_error(interp, line, "math::ceil requires a numeric argument",
-                      "Ensure the value passed to math::ceil is a number.");
-        return value_nothing();
-    }
-    return value_number(ceil(args[0].as.number));
-}
-
 static bool load_native_module(Interpreter *interp, const char *name) {
     if (strcmp(name, "core") == 0) {
         Value write = value_native(native_core_write_line, "core::write_line");
         environment_define(interp->globals, "core::write_line", write);
         value_free(write);
-        return true;
-    } else if (strcmp(name, "math") == 0) {
-        Value pi = value_number(3.14159265358979323846);
-        environment_define(interp->globals, "math::pi", pi);
-        value_free(pi);
-
-        Value abs = value_native(native_math_abs, "math::abs");
-        environment_define(interp->globals, "math::abs", abs);
-        value_free(abs);
-
-        Value floor_fn = value_native(native_math_floor, "math::floor");
-        environment_define(interp->globals, "math::floor", floor_fn);
-        value_free(floor_fn);
-
-        Value ceil_fn = value_native(native_math_ceil, "math::ceil");
-        environment_define(interp->globals, "math::ceil", ceil_fn);
-        value_free(ceil_fn);
-
         return true;
     }
     return false;

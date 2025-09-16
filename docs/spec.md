@@ -67,6 +67,7 @@ primary        → NUMBER | STRING | "true" | "false" | "nothing"
 ### 4.2 Environments & Scope
 - Each block (`block`) introduces a new environment that chains to the enclosing environment.
 - `let` binds immutably within the current block environment.
+- Bindings may include namespace qualifiers (`library::name`) to expose module exports.
 - `set` walks outward to update the nearest existing binding; error if not found.
 - Routines capture their defining environment (reference-counted). Invoking a routine creates a fresh environment enclosed by that captured environment for parameters & locals.
 - Closures remain valid even if the original block has exited.
@@ -84,22 +85,22 @@ primary        → NUMBER | STRING | "true" | "false" | "nothing"
 
 ## 5. Modules & Libraries
 - `gather <name>` loads modules once per interpreter run. Order:
-  1. Native modules registered in the runtime (currently `core`, `math`).
+  1. Native modules registered in the runtime (currently `core`).
   2. Script modules located at `libs/<name>.ls` (executed in the current interpreter).
 - Circular gathers produce a runtime error with a hint.
 
 ### 5.1 Native Modules
 - `core`:
   - `core::write_line(...)` — prints arguments separated by spaces with newline. Requires at least one argument.
-- `math`:
-  - `math::pi` constant (`3.141592653589793`)
-  - `math::abs(x)`
-  - `math::floor(x)`
-  - `math::ceil(x)`
-  - All Functions require exactly one numeric argument.
 
 ### 5.2 Script Modules
 - Stored under `libs/`. Executed the first time they are gathered; their top-level code runs, and any `note` definitions / bindings persist via stored ASTs.
+- `libs/math.ls` currently exposes:
+  - `math::pi` constant (`3.14159265358979323846`)
+  - `math::abs(x)` — absolute value
+  - `math::floor(x)` — greatest integer ≤ `x`
+  - `math::ceil(x)` — smallest integer ≥ `x`
+  - Implemented entirely in Liesel using loops and comparisons; relies on `core` only for eventual display helpers.
 
 ## 6. Errors
 - Lexical, parse, runtime, and system errors emit `Hint:` lines with actionable suggestions.
@@ -122,4 +123,3 @@ Any future change must update this spec to remain authoritative. Planned areas i
 - First-class data structures (records, lists).
 - Gradual typing syntax (`: number`, etc.).
 - Improved error recovery in the parser.
-
