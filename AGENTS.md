@@ -29,3 +29,4 @@
 ## Architecture Notes
 - Interpreter entrypoint is `main()` in `src/main.c`, delegating to the execution pipeline defined in `lie_run_file()`.
 - Runtime errors flow through `error.h/error.c`; ensure new diagnostics stay structured and actionable.
+- The module loader walks multiple roots (`./`, script directory parents, registered install paths, `$LIESEL_HOME`) when resolving `libs/<name>.ls`.

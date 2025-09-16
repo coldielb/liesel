@@ -10,6 +10,17 @@
 #include <stdarg.h>
 #include <string.h>
 #include <sys/types.h>
+#include <limits.h>
+#if defined(_WIN32)
+#include <direct.h>
+#define getcwd _getcwd
+#else
+#include <unistd.h>
+#endif
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #define UNUSED(x) (void)(x)
 #define CHECK_ALLOC(ptr)                     \
@@ -31,6 +42,145 @@ static char *copy_string(const char *start, size_t length) {
 
 static char *duplicate_cstring(const char *text) {
     return copy_string(text, strlen(text));
+}
+
+static bool is_path_separator(char c) {
+    return c == '/' || c == '\\';
+}
+
+static bool path_is_absolute(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+#if defined(_WIN32)
+    if (is_path_separator(path[0])) {
+        return true;
+    }
+    return (strlen(path) > 1 && path[1] == ':');
+#else
+    return path[0] == '/';
+#endif
+}
+
+static char *resolve_absolute_path(const char *path) {
+    if (path == NULL) {
+        return NULL;
+    }
+#if defined(_WIN32)
+    if (path_is_absolute(path)) {
+        return duplicate_cstring(path);
+    }
+#endif
+#if !defined(_WIN32)
+    char *resolved = realpath(path, NULL);
+    if (resolved != NULL) {
+        return resolved;
+    }
+#endif
+    if (path_is_absolute(path)) {
+        return duplicate_cstring(path);
+    }
+
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        return duplicate_cstring(path);
+    }
+
+    size_t cwd_len = strlen(cwd);
+    bool need_sep = cwd_len > 0 && !is_path_separator(cwd[cwd_len - 1]);
+    size_t path_len = strlen(path);
+    size_t total = cwd_len + (need_sep ? 1 : 0) + path_len + 1;
+    char *result = (char *)malloc(total);
+    CHECK_ALLOC(result);
+    memcpy(result, cwd, cwd_len);
+    size_t pos = cwd_len;
+    if (need_sep) {
+        result[pos++] = '/';
+    }
+    memcpy(result + pos, path, path_len + 1);
+    return result;
+}
+
+static bool path_is_root(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+#if defined(_WIN32)
+    if (path[0] == '\0') {
+        return false;
+    }
+    if ((path[0] == '/' || path[0] == '\\') && path[1] == '\0') {
+        return true;
+    }
+    if (strlen(path) == 2 && path[1] == ':') {
+        return true;
+    }
+    if (strlen(path) == 3 && path[1] == ':' && is_path_separator(path[2])) {
+        return true;
+    }
+    return false;
+#else
+    return path[0] == '/' && path[1] == '\0';
+#endif
+}
+
+static char *path_dirname_copy(const char *path) {
+    if (path == NULL) {
+        return NULL;
+    }
+    size_t len = strlen(path);
+    if (len == 0) {
+        return NULL;
+    }
+
+    while (len > 1 && is_path_separator(path[len - 1])) {
+        len--;
+    }
+    if (len == 0) {
+        return NULL;
+    }
+
+    size_t i = len;
+    while (i > 0) {
+        if (is_path_separator(path[i - 1])) {
+            break;
+        }
+        i--;
+    }
+    if (i == 0) {
+#if defined(_WIN32)
+        if (len >= 2 && path[1] == ':') {
+            char *drive = (char *)malloc(3);
+            CHECK_ALLOC(drive);
+            drive[0] = path[0];
+            drive[1] = ':';
+            drive[2] = '\0';
+            return drive;
+        }
+#endif
+        return NULL;
+    }
+
+    size_t parent_len = i;
+    while (parent_len > 1 && is_path_separator(path[parent_len - 1])) {
+        parent_len--;
+    }
+#if defined(_WIN32)
+    if (parent_len == 0 && is_path_separator(path[0])) {
+        parent_len = 1;
+    }
+    if (parent_len == 2 && path[1] == ':') {
+        parent_len = 2;
+    }
+#endif
+    if (parent_len == 0) {
+        parent_len = 1;
+    }
+    char *result = (char *)malloc(parent_len + 1);
+    CHECK_ALLOC(result);
+    memcpy(result, path, parent_len);
+    result[parent_len] = '\0';
+    return result;
 }
 
 /* ========================= LEXER ========================= */
@@ -1797,6 +1947,26 @@ static void string_list_pop(StringList *list) {
     list->count--;
 }
 
+static StringList g_module_paths;
+static bool g_module_paths_initialized = false;
+
+static void ensure_global_module_paths(void) {
+    if (!g_module_paths_initialized) {
+        string_list_init(&g_module_paths);
+        g_module_paths_initialized = true;
+    }
+}
+
+void lie_register_module_path(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    ensure_global_module_paths();
+    if (!string_list_contains(&g_module_paths, path)) {
+        string_list_push(&g_module_paths, path);
+    }
+}
+
 typedef struct {
     Stmt **statements;
     size_t count;
@@ -1857,11 +2027,12 @@ struct Interpreter {
     Environment *globals;
     Environment *current;
     bool had_runtime_error;
-    int call_depth;
-    int loop_depth;
-    StringList loaded_modules;
-    StringList loading_modules;
-    ProgramStore stored_programs;
+   int call_depth;
+   int loop_depth;
+   StringList loaded_modules;
+   StringList loading_modules;
+   ProgramStore stored_programs;
+    StringList module_paths;
 };
 
 static ExecResult exec_result_none(void) {
@@ -1878,6 +2049,52 @@ static ExecResult exec_result_value(Value value) {
     return result;
 }
 
+static void interpreter_add_module_path(Interpreter *interp, const char *path) {
+    if (interp == NULL || path == NULL || path[0] == '\0') {
+        return;
+    }
+    if (!string_list_contains(&interp->module_paths, path)) {
+        string_list_push(&interp->module_paths, path);
+    }
+}
+
+static void interpreter_apply_global_module_paths(Interpreter *interp) {
+    ensure_global_module_paths();
+    for (size_t i = 0; i < g_module_paths.count; ++i) {
+        interpreter_add_module_path(interp, g_module_paths.items[i]);
+    }
+}
+
+static void interpreter_add_script_paths(Interpreter *interp, const char *script_path) {
+    if (interp == NULL || script_path == NULL) {
+        return;
+    }
+    char *absolute = resolve_absolute_path(script_path);
+    if (absolute == NULL) {
+        return;
+    }
+    char *current = path_dirname_copy(absolute);
+    free(absolute);
+    if (current == NULL || current[0] == '\0') {
+        free(current);
+        return;
+    }
+
+    while (current != NULL && current[0] != '\0') {
+        interpreter_add_module_path(interp, current);
+        if (path_is_root(current)) {
+            break;
+        }
+        char *parent = path_dirname_copy(current);
+        if (parent == NULL) {
+            break;
+        }
+        free(current);
+        current = parent;
+    }
+    free(current);
+}
+
 static void interpreter_init(Interpreter *interp) {
     interp->globals = environment_new(NULL);
     interp->current = interp->globals;
@@ -1887,6 +2104,9 @@ static void interpreter_init(Interpreter *interp) {
     string_list_init(&interp->loaded_modules);
     string_list_init(&interp->loading_modules);
     program_store_init(&interp->stored_programs);
+    string_list_init(&interp->module_paths);
+    interpreter_add_module_path(interp, ".");
+    interpreter_apply_global_module_paths(interp);
 }
 
 static void interpreter_free(Interpreter *interp) {
@@ -1896,6 +2116,7 @@ static void interpreter_free(Interpreter *interp) {
     string_list_free(&interp->loaded_modules);
     string_list_free(&interp->loading_modules);
     program_store_free(&interp->stored_programs);
+    string_list_free(&interp->module_paths);
 }
 
 static void runtime_error(Interpreter *interp, int line, const char *message, const char *hint_fmt, ...) {
@@ -2157,36 +2378,58 @@ typedef enum {
 
 static char *read_file_internal(const char *path, size_t *out_length, bool suppress_missing, bool *out_missing);
 
-static ModuleLoadResult load_script_module(Interpreter *interp, const char *name) {
-    size_t base_len = strlen("libs/");
-    size_t ext_len = strlen(".ls");
-    size_t name_len = strlen(name);
-    size_t path_len = base_len + name_len + ext_len;
-    char *path = (char *)malloc(path_len + 1);
+static char *module_candidate_path(const char *base, const char *name) {
+    const char *module_dir = "libs/";
+    size_t base_len = base ? strlen(base) : 0;
+    size_t needs_sep = (base_len > 0 && !is_path_separator(base[base_len - 1])) ? 1 : 0;
+    size_t path_len = base_len + needs_sep + strlen(module_dir) + strlen(name) + 3 + 1;
+    char *path = (char *)malloc(path_len);
     CHECK_ALLOC(path);
-    memcpy(path, "libs/", base_len);
-    memcpy(path + base_len, name, name_len);
-    memcpy(path + base_len + name_len, ".ls", ext_len + 1);
-
-    bool missing = false;
-    size_t length = 0;
-    char *source = read_file_internal(path, &length, true, &missing);
-    free(path);
-
-    if (missing) {
-        return MODULE_NOT_FOUND;
+    size_t pos = 0;
+    if (base_len > 0) {
+        memcpy(path, base, base_len);
+        pos += base_len;
+        if (needs_sep) {
+            path[pos++] = '/';
+        }
     }
-    if (source == NULL) {
-        return MODULE_FAILED;
-    }
+    memcpy(path + pos, module_dir, strlen(module_dir));
+    pos += strlen(module_dir);
+    size_t name_len = strlen(name);
+    memcpy(path + pos, name, name_len);
+    pos += name_len;
+    memcpy(path + pos, ".ls", 3);
+    pos += 3;
+    path[pos] = '\0';
+    return path;
+}
 
-    int status = interpret_source(interp, source, true);
-    free(source);
-    if (status != 0) {
-        interp->had_runtime_error = true;
-        return MODULE_FAILED;
+static ModuleLoadResult load_script_module(Interpreter *interp, const char *name) {
+    bool saw_missing = false;
+    for (size_t i = 0; i < interp->module_paths.count; ++i) {
+        char *candidate = module_candidate_path(interp->module_paths.items[i], name);
+        bool missing = false;
+        size_t length = 0;
+        char *source = read_file_internal(candidate, &length, true, &missing);
+        free(candidate);
+
+        if (missing) {
+            saw_missing = true;
+            continue;
+        }
+        if (source == NULL) {
+            return MODULE_FAILED;
+        }
+
+        int status = interpret_source(interp, source, true);
+        free(source);
+        if (status != 0) {
+            interp->had_runtime_error = true;
+            return MODULE_FAILED;
+        }
+        return MODULE_LOADED;
     }
-    return MODULE_LOADED;
+    return saw_missing ? MODULE_NOT_FOUND : MODULE_NOT_FOUND;
 }
 
 static bool interpreter_load_module(Interpreter *interp, const char *name, int line) {
@@ -2230,7 +2473,32 @@ static bool interpreter_load_module(Interpreter *interp, const char *name, int l
     if (!interp->had_runtime_error) {
         lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
                          "Unknown library '%s'", name);
-        lie_error_hint("Ensure 'libs/%s.ls' exists or provide a native module with that name.", name);
+        if (interp->module_paths.count > 0) {
+            size_t total = 0;
+            for (size_t i = 0; i < interp->module_paths.count; ++i) {
+                char *candidate = module_candidate_path(interp->module_paths.items[i], name);
+                total += strlen(candidate) + 2;
+                free(candidate);
+            }
+            char *locations = (char *)malloc(total + 1);
+            CHECK_ALLOC(locations);
+            size_t pos = 0;
+            for (size_t i = 0; i < interp->module_paths.count; ++i) {
+                char *candidate = module_candidate_path(interp->module_paths.items[i], name);
+                size_t len = strlen(candidate);
+                memcpy(locations + pos, candidate, len);
+                pos += len;
+                if (i + 1 < interp->module_paths.count) {
+                    locations[pos++] = ',';
+                    locations[pos++] = ' ';
+                }
+                free(candidate);
+            }
+            locations[pos] = '\0';
+            lie_error_hint("Searched locations: %s", locations);
+            free(locations);
+        }
+        lie_error_hint("Ensure a matching 'libs/%s.ls' exists in one of the search roots or provide a native module with that name.", name);
         interp->had_runtime_error = true;
     }
     return false;
@@ -3013,8 +3281,14 @@ int lie_run_file(const char *path) {
         return 74;
     }
 
+    const char *env_home = getenv("LIESEL_HOME");
+    if (env_home != NULL && env_home[0] != '\0') {
+        lie_register_module_path(env_home);
+    }
+
     Interpreter interp;
     interpreter_init(&interp);
+    interpreter_add_script_paths(&interp, path);
     int status = interpret_source(&interp, source, false);
     interpreter_free(&interp);
     free(source);

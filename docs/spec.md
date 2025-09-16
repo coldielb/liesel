@@ -98,9 +98,9 @@ recordField    → (IDENTIFIER | STRING) "be" expression
 - `halt` outside a routine triggers a runtime error.
 
 ## 5. Modules & Libraries
-- `gather <name>` loads modules once per interpreter run. Order:
+- `gather <name>` loads modules once per interpreter run. Resolution order:
   1. Native modules registered in the runtime (currently `core`).
-  2. Script modules located at `libs/<name>.ls` (executed in the current interpreter).
+  2. Script modules located at `libs/<name>.ls`. The interpreter searches a cascade of module roots: the current working directory, the directory containing the executing script (and its parent chain), any paths registered through the CLI (including the interpreter binary directory and its parent), and the optional `LIESEL_HOME` environment variable. The first match wins and is executed within the current interpreter.
 - Circular gathers produce a runtime error with a hint.
 
 ### 5.1 Native Modules
@@ -135,6 +135,7 @@ recordField    → (IDENTIFIER | STRING) "be" expression
 - `examples/story.ls` — nested loops with helper routine.
 - `examples/math-demo.ls` — demonstrates math library and closures.
 - `examples/control-demo.ls` — showcases break/continue and collection indexing.
+- `examples/fibonacci.ls` — showcases recursive definitions for Fibonacci numbers.
 - `examples/error-intentional.ls` — triggers runtime arity error to showcase diagnostics.
 
 ## 8. Implementation Notes
