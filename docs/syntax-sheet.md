@@ -93,6 +93,7 @@ note greet(person):
     halt nothing
 ```
 - `halt` exits the routine. If omitted, `nothing` is returned by default.
+- Routines may now be declared inside other routines or blocks for helper logic (escaping closures are on the roadmap).
 
 ## Expressions
 - Expression statements evaluate the expression and discard the value unless used in a routine with `halt`.
@@ -100,8 +101,9 @@ note greet(person):
 - Parentheses group expressions.
 
 ## Libraries & Modules
-- `gather io` loads the standard I/O library and exposes it under the `io` namespace.
-- Core runtime ships with a minimal loader and registry. Libraries are dynamic units written in Liesel or C and registered separately.
+- `gather <name>` loads each module once, first checking for native runtime bridges, then for a script library at `libs/<name>.ls`. Modules may depend on one another using nested `gather`.
+- The runtime ships with a tiny native `core` module that exposes host bridges (currently `core::write_line`) intended for library authors.
+- The user-facing `io` module lives in `libs/io.ls` and delegates to `core::write_line` to implement `io::echo`.
 
 ### Example Script
 ```
@@ -128,5 +130,5 @@ main()
 - Add pattern matching constructs after loops and functions are fully implemented.
 
 ## Current Implementation Status (alpha)
-- Implemented in the interpreter today: indentation-aware blocks (colon + leading spaces), `gather`, `let`, `set`, routines (`note` / `halt`), branching (`if` / `otherwise`), looping (`whilst`), expression statements, arithmetic/logic expressions, native library bridge (`io::echo`), booleans, numbers, strings, `nothing`, `and`/`or`/`not`.
-- Planned next iterations: richer standard modules (`math`, `text`), structured data types, module packaging conventions, and future gradual typing.
+- Implemented in the interpreter today: indentation-aware blocks (colon + leading spaces), nested routine declarations, `gather` with native/module loading cache, `let`, `set`, routines (`note` / `halt`), branching (`if` / `otherwise`), looping (`whilst`), expression statements, arithmetic/logic expressions, the `core::write_line` bridge + `io` library, booleans, numbers, strings, `nothing`, `and`/`or`/`not`.
+- Planned next iterations: richer standard modules (`math`, `text`), structured data types, module packaging conventions (including versioning), resilient closures that survive scope exit, and future gradual typing.

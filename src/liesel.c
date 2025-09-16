@@ -1,4 +1,5 @@
 #include "liesel.h"
+#include "error.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -10,12 +11,13 @@
 #include <sys/types.h>
 
 #define UNUSED(x) (void)(x)
-#define CHECK_ALLOC(ptr)                     \
-    do {                                     \
-        if ((ptr) == NULL) {                 \
-            fprintf(stderr, "Out of memory\n"); \
-            exit(74);                        \
-        }                                    \
+#define CHECK_ALLOC(ptr)                                         \
+    do {                                                         \
+        if ((ptr) == NULL) {                                     \
+            lie_error_report(LIE_ERROR_SYSTEM, 0, NULL, 0,        \
+                             "Out of memory");                  \
+            exit(74);                                            \
+        }                                                        \
     } while (0)
 
 static char *copy_string(const char *start, size_t length) {
@@ -626,13 +628,13 @@ static bool parser_match(Parser *parser, TokenType type) {
 
 static void parser_error_at(Parser *parser, Token token, const char *message) {
     parser->had_error = true;
-    fprintf(stderr, "[line %d] Error", token.line);
-    if (token.type == TOKEN_EOF) {
-        fprintf(stderr, " at end");
-    } else {
-        fprintf(stderr, " at '%.*s'", (int)token.length, token.start);
+    const char *lexeme = NULL;
+    size_t length = 0;
+    if (token.type != TOKEN_EOF) {
+        lexeme = token.start;
+        length = token.length;
     }
-    fprintf(stderr, ": %s\n", message);
+    lie_error_report(LIE_ERROR_PARSE, token.line, lexeme, length, "%s", message);
 }
 
 static void parser_consume(Parser *parser, TokenType type, const char *message) {
@@ -1410,6 +1412,96 @@ static bool environment_get(Environment *env, const char *name, Value *out) {
     return false;
 }
 
+typedef struct {
+    char **items;
+    size_t count;
+    size_t capacity;
+} StringList;
+
+static void string_list_init(StringList *list) {
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static void string_list_free(StringList *list) {
+    for (size_t i = 0; i < list->count; ++i) {
+        free(list->items[i]);
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static bool string_list_contains(const StringList *list, const char *name) {
+    for (size_t i = 0; i < list->count; ++i) {
+        if (strcmp(list->items[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void string_list_push(StringList *list, const char *name) {
+    if (list->count + 1 > list->capacity) {
+        size_t new_capacity = list->capacity < 8 ? 8 : list->capacity * 2;
+        char **new_items = (char **)realloc(list->items, new_capacity * sizeof(char *));
+        CHECK_ALLOC(new_items);
+        list->items = new_items;
+        list->capacity = new_capacity;
+    }
+    list->items[list->count++] = duplicate_cstring(name);
+}
+
+static void string_list_pop(StringList *list) {
+    if (list->count == 0) return;
+    free(list->items[list->count - 1]);
+    list->count--;
+}
+
+typedef struct {
+    Stmt **statements;
+    size_t count;
+} StoredProgram;
+
+typedef struct {
+    StoredProgram *items;
+    size_t count;
+    size_t capacity;
+} ProgramStore;
+
+static void free_program(Stmt **statements, size_t count);
+
+static void program_store_init(ProgramStore *store) {
+    store->items = NULL;
+    store->count = 0;
+    store->capacity = 0;
+}
+
+static void program_store_free(ProgramStore *store) {
+    for (size_t i = 0; i < store->count; ++i) {
+        free_program(store->items[i].statements, store->items[i].count);
+    }
+    free(store->items);
+    store->items = NULL;
+    store->count = 0;
+    store->capacity = 0;
+}
+
+static void program_store_push(ProgramStore *store, Stmt **statements, size_t count) {
+    if (store->count + 1 > store->capacity) {
+        size_t new_capacity = store->capacity < 4 ? 4 : store->capacity * 2;
+        StoredProgram *new_items = (StoredProgram *)realloc(store->items, new_capacity * sizeof(StoredProgram));
+        CHECK_ALLOC(new_items);
+        store->items = new_items;
+        store->capacity = new_capacity;
+    }
+    store->items[store->count].statements = statements;
+    store->items[store->count].count = count;
+    store->count++;
+}
+
 /* ========================= INTERPRETER ========================= */
 
 typedef struct {
@@ -1421,8 +1513,10 @@ struct Interpreter {
     Environment globals;
     Environment *current;
     bool had_runtime_error;
-    bool io_loaded;
     int call_depth;
+    StringList loaded_modules;
+    StringList loading_modules;
+    ProgramStore stored_programs;
 };
 
 static ExecResult exec_result_none(void) {
@@ -1443,17 +1537,22 @@ static void interpreter_init(Interpreter *interp) {
     environment_init(&interp->globals, NULL);
     interp->current = &interp->globals;
     interp->had_runtime_error = false;
-    interp->io_loaded = false;
     interp->call_depth = 0;
+    string_list_init(&interp->loaded_modules);
+    string_list_init(&interp->loading_modules);
+    program_store_init(&interp->stored_programs);
 }
 
 static void interpreter_free(Interpreter *interp) {
     environment_free(&interp->globals);
+    string_list_free(&interp->loaded_modules);
+    string_list_free(&interp->loading_modules);
+    program_store_free(&interp->stored_programs);
 }
 
 static void runtime_error(Interpreter *interp, int line, const char *message) {
     if (!interp->had_runtime_error) {
-        fprintf(stderr, "[line %d] Runtime error: %s\n", line, message);
+        lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0, "%s", message);
     }
     interp->had_runtime_error = true;
 }
@@ -1461,11 +1560,13 @@ static void runtime_error(Interpreter *interp, int line, const char *message) {
 static Value eval_expression(Interpreter *interp, Expr *expr);
 static ExecResult execute_statement(Interpreter *interp, Stmt *stmt);
 static ExecResult execute_block(Interpreter *interp, BlockStmt *block);
+static int interpret_source(Interpreter *interp, const char *source, bool keep_program);
 
-static Value native_io_echo(Interpreter *interp, int arg_count, Value *args, int line) {
+static Value native_core_write_line(Interpreter *interp, int arg_count, Value *args, int line) {
     UNUSED(interp);
     if (arg_count < 1) {
-        fprintf(stderr, "[line %d] io::echo expects at least 1 argument\n", line);
+        lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
+                         "core::write_line expects at least 1 argument");
         return value_nothing();
     }
     for (int i = 0; i < arg_count; ++i) {
@@ -1480,21 +1581,99 @@ static Value native_io_echo(Interpreter *interp, int arg_count, Value *args, int
     return value_nothing();
 }
 
-static void load_io_library(Interpreter *interp) {
-    if (interp->io_loaded) return;
-    Value echo = value_native(native_io_echo, "io::echo");
-    environment_define(&interp->globals, "io::echo", echo);
-    value_free(echo);
-    interp->io_loaded = true;
+static bool load_native_module(Interpreter *interp, const char *name) {
+    if (strcmp(name, "core") == 0) {
+        Value write = value_native(native_core_write_line, "core::write_line");
+        environment_define(&interp->globals, "core::write_line", write);
+        value_free(write);
+        return true;
+    }
+    return false;
 }
 
-static void evaluate_gather(Interpreter *interp, GatherStmt *stmt) {
-    if (strcmp(stmt->module_name, "io") == 0) {
-        load_io_library(interp);
-        return;
+typedef enum {
+    MODULE_NOT_FOUND,
+    MODULE_LOADED,
+    MODULE_FAILED
+} ModuleLoadResult;
+
+static char *read_file_internal(const char *path, size_t *out_length, bool suppress_missing, bool *out_missing);
+
+static ModuleLoadResult load_script_module(Interpreter *interp, const char *name) {
+    size_t base_len = strlen("libs/");
+    size_t ext_len = strlen(".ls");
+    size_t name_len = strlen(name);
+    size_t path_len = base_len + name_len + ext_len;
+    char *path = (char *)malloc(path_len + 1);
+    CHECK_ALLOC(path);
+    memcpy(path, "libs/", base_len);
+    memcpy(path + base_len, name, name_len);
+    memcpy(path + base_len + name_len, ".ls", ext_len + 1);
+
+    bool missing = false;
+    size_t length = 0;
+    char *source = read_file_internal(path, &length, true, &missing);
+    free(path);
+
+    if (missing) {
+        return MODULE_NOT_FOUND;
     }
-    fprintf(stderr, "Unknown library '%s'\n", stmt->module_name);
-    interp->had_runtime_error = true;
+    if (source == NULL) {
+        return MODULE_FAILED;
+    }
+
+    int status = interpret_source(interp, source, true);
+    free(source);
+    if (status != 0) {
+        interp->had_runtime_error = true;
+        return MODULE_FAILED;
+    }
+    return MODULE_LOADED;
+}
+
+static bool interpreter_load_module(Interpreter *interp, const char *name, int line) {
+    if (interp->had_runtime_error) {
+        return false;
+    }
+    if (string_list_contains(&interp->loaded_modules, name)) {
+        return true;
+    }
+    if (string_list_contains(&interp->loading_modules, name)) {
+        lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
+                         "Circular gather of '%s'", name);
+        interp->had_runtime_error = true;
+        return false;
+    }
+
+    string_list_push(&interp->loading_modules, name);
+
+    bool loaded = false;
+    if (load_native_module(interp, name)) {
+        loaded = true;
+    } else {
+        ModuleLoadResult result = load_script_module(interp, name);
+        if (result == MODULE_LOADED) {
+            loaded = true;
+        } else if (result == MODULE_FAILED) {
+            /* errors already reported */
+        }
+    }
+
+    string_list_pop(&interp->loading_modules);
+
+    if (loaded) {
+        if (!string_list_contains(&interp->loaded_modules, name)) {
+            string_list_push(&interp->loaded_modules, name);
+        }
+        return true;
+    }
+
+    if (!interp->had_runtime_error) {
+        lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
+                         "Unknown library '%s'", name);
+        interp->had_runtime_error = true;
+    }
+    return false;
 }
 
 static Value eval_literal(Literal literal) {
@@ -1781,7 +1960,7 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
     if (interp->had_runtime_error) return exec_result_none();
     switch (stmt->type) {
         case STMT_GATHER:
-            evaluate_gather(interp, &stmt->as.gather);
+            interpreter_load_module(interp, stmt->as.gather.module_name, stmt->line);
             return exec_result_none();
         case STMT_LET: {
             Value value = eval_expression(interp, stmt->as.let_stmt.value);
@@ -1836,10 +2015,6 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
             return exec_result_none();
         }
         case STMT_FUNCTION: {
-            if (interp->current != &interp->globals) {
-                runtime_error(interp, stmt->line, "Functions may currently be declared only at top-level");
-                return exec_result_none();
-            }
             Function *function = function_new(&stmt->as.function, interp->current);
             Value fn_value = value_function(function);
             environment_define(interp->current, stmt->as.function.name, fn_value);
@@ -1980,18 +2155,30 @@ static void free_program(Stmt **statements, size_t count) {
 
 /* ========================= DRIVER ========================= */
 
-static char *read_file(const char *path, size_t *out_length) {
+static char *read_file_internal(const char *path, size_t *out_length, bool suppress_missing, bool *out_missing) {
+    if (out_missing) {
+        *out_missing = false;
+    }
+    errno = 0;
     FILE *file = fopen(path, "rb");
     if (!file) {
-        fprintf(stderr, "Could not open file '%s': %s\n", path, strerror(errno));
+        if (suppress_missing && errno == ENOENT) {
+            if (out_missing) {
+                *out_missing = true;
+            }
+            return NULL;
+        }
+        lie_error_system(path, errno);
         return NULL;
     }
     if (fseek(file, 0L, SEEK_END) != 0) {
+        lie_error_system(path, errno);
         fclose(file);
         return NULL;
     }
     long size = ftell(file);
     if (size < 0) {
+        lie_error_system(path, errno);
         fclose(file);
         return NULL;
     }
@@ -1999,6 +2186,12 @@ static char *read_file(const char *path, size_t *out_length) {
     char *buffer = (char *)malloc((size_t)size + 1);
     CHECK_ALLOC(buffer);
     size_t read = fread(buffer, 1, (size_t)size, file);
+    if (ferror(file)) {
+        lie_error_system(path, errno);
+        fclose(file);
+        free(buffer);
+        return NULL;
+    }
     buffer[read] = '\0';
     fclose(file);
     if (out_length) {
@@ -2007,13 +2200,11 @@ static char *read_file(const char *path, size_t *out_length) {
     return buffer;
 }
 
-int lie_run_file(const char *path) {
-    size_t length = 0;
-    char *source = read_file(path, &length);
-    if (source == NULL) {
-        return 74;
-    }
+static char *read_file(const char *path, size_t *out_length) {
+    return read_file_internal(path, out_length, false, NULL);
+}
 
+static int interpret_source(Interpreter *interp, const char *source, bool keep_program) {
     Lexer lexer;
     lexer_init(&lexer, source);
 
@@ -2029,8 +2220,8 @@ int lie_run_file(const char *path) {
     }
 
     if (tokens.count > 0 && tokens.data[tokens.count - 1].type == TOKEN_ERROR) {
-        fprintf(stderr, "[line %d] Lex error: %s\n", tokens.data[tokens.count - 1].line, tokens.data[tokens.count - 1].message);
-        free(source);
+        Token error_token_obj = tokens.data[tokens.count - 1];
+        lie_error_report(LIE_ERROR_LEX, error_token_obj.line, NULL, 0, "%s", error_token_obj.message);
         token_buffer_free(&tokens);
         return 65;
     }
@@ -2043,18 +2234,32 @@ int lie_run_file(const char *path) {
     if (parser.had_error) {
         free_program(statements, stmt_count);
         token_buffer_free(&tokens);
-        free(source);
         return 65;
+    }
+
+    execute_program(interp, statements, stmt_count);
+    int status = interp->had_runtime_error ? 70 : 0;
+
+    if (keep_program && status == 0) {
+        program_store_push(&interp->stored_programs, statements, stmt_count);
+    } else {
+        free_program(statements, stmt_count);
+    }
+    token_buffer_free(&tokens);
+    return status;
+}
+
+int lie_run_file(const char *path) {
+    size_t length = 0;
+    char *source = read_file(path, &length);
+    if (source == NULL) {
+        return 74;
     }
 
     Interpreter interp;
     interpreter_init(&interp);
-    execute_program(&interp, statements, stmt_count);
-    int status = interp.had_runtime_error ? 70 : 0;
-
+    int status = interpret_source(&interp, source, false);
     interpreter_free(&interp);
-    free_program(statements, stmt_count);
-    token_buffer_free(&tokens);
     free(source);
     return status;
 }
