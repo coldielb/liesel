@@ -33,6 +33,15 @@ void lie_error_report(LieErrorKind kind, int line, const char *lexeme_start, siz
     fputc('\n', stderr);
 }
 
+void lie_error_hint(const char *fmt, ...) {
+    fputs("    Hint: ", stderr);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fputc('\n', stderr);
+}
+
 void lie_error_system(const char *context, int errnum) {
     const char *message = strerror(errnum);
     fprintf(stderr, "[system] %s: %s\n", context, message ? message : "unknown error");

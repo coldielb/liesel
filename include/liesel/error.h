@@ -11,6 +11,7 @@ typedef enum {
 } LieErrorKind;
 
 void lie_error_report(LieErrorKind kind, int line, const char *lexeme_start, size_t lexeme_length, const char *fmt, ...);
+void lie_error_hint(const char *fmt, ...);
 void lie_error_system(const char *context, int errnum);
 
 #endif

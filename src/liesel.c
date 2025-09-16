@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/types.h>
 
@@ -889,6 +890,7 @@ static void parser_synchronize(Parser *parser) {
 static Stmt *parse_gather_statement(Parser *parser, Token keyword) {
     if (!parser_check(parser, TOKEN_IDENTIFIER)) {
         parser_error_at(parser, parser_peek(parser), "Expected module name after 'gather'");
+        lie_error_hint("Use a bare module name such as 'gather io'.");
         return NULL;
     }
     Token name_token = parser_advance(parser);
@@ -900,11 +902,13 @@ static Stmt *parse_gather_statement(Parser *parser, Token keyword) {
 static Stmt *parse_let_statement(Parser *parser, Token keyword) {
     if (!parser_check(parser, TOKEN_IDENTIFIER)) {
         parser_error_at(parser, parser_peek(parser), "Expected name after 'let'");
+        lie_error_hint("Introduce names with letters/underscores, e.g. 'let mood be ...'.");
         return NULL;
     }
     Token name_token = parser_advance(parser);
     if (identifier_has_namespace(name_token)) {
         parser_error_at(parser, name_token, "Bindings cannot contain '::'");
+        lie_error_hint("Drop the module prefix here; bind it locally as 'let name be ...'.");
         return NULL;
     }
     parser_consume(parser, TOKEN_BE, "Expected 'be' after name");
@@ -919,11 +923,13 @@ static Stmt *parse_let_statement(Parser *parser, Token keyword) {
 static Stmt *parse_set_statement(Parser *parser, Token keyword) {
     if (!parser_check(parser, TOKEN_IDENTIFIER)) {
         parser_error_at(parser, parser_peek(parser), "Expected name after 'set'");
+        lie_error_hint("Update a previously bound name, e.g. 'set mood to ...'.");
         return NULL;
     }
     Token name_token = parser_advance(parser);
     if (identifier_has_namespace(name_token)) {
         parser_error_at(parser, name_token, "Assignments cannot target '::' names");
+        lie_error_hint("Use a simple name that was declared with 'let'.");
         return NULL;
     }
     parser_consume(parser, TOKEN_TO, "Expected 'to' after name");
@@ -1026,11 +1032,13 @@ static Stmt *parse_function(Parser *parser, Token keyword) {
         do {
             if (!parser_check(parser, TOKEN_IDENTIFIER)) {
                 parser_error_at(parser, parser_peek(parser), "Expected parameter name");
+                lie_error_hint("List parameters like 'note f(x, y): ...'.");
                 break;
             }
             Token param = parser_advance(parser);
             if (identifier_has_namespace(param)) {
                 parser_error_at(parser, param, "Parameters cannot contain '::'");
+                lie_error_hint("Parameters should be plain names without module qualifiers.");
                 break;
             }
             if (param_count + 1 > capacity) {
@@ -1550,9 +1558,18 @@ static void interpreter_free(Interpreter *interp) {
     program_store_free(&interp->stored_programs);
 }
 
-static void runtime_error(Interpreter *interp, int line, const char *message) {
-    if (!interp->had_runtime_error) {
-        lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0, "%s", message);
+static void runtime_error(Interpreter *interp, int line, const char *message, const char *hint_fmt, ...) {
+    if (interp->had_runtime_error) {
+        return;
+    }
+    lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0, "%s", message);
+    if (hint_fmt != NULL) {
+        char buffer[256];
+        va_list args;
+        va_start(args, hint_fmt);
+        vsnprintf(buffer, sizeof(buffer), hint_fmt, args);
+        va_end(args);
+        lie_error_hint("%s", buffer);
     }
     interp->had_runtime_error = true;
 }
@@ -1567,6 +1584,7 @@ static Value native_core_write_line(Interpreter *interp, int arg_count, Value *a
     if (arg_count < 1) {
         lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
                          "core::write_line expects at least 1 argument");
+        lie_error_hint("Pass the text you want to display, e.g. core::write_line(""hello"").");
         return value_nothing();
     }
     for (int i = 0; i < arg_count; ++i) {
@@ -1641,6 +1659,7 @@ static bool interpreter_load_module(Interpreter *interp, const char *name, int l
     if (string_list_contains(&interp->loading_modules, name)) {
         lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
                          "Circular gather of '%s'", name);
+        lie_error_hint("Review module '%s' to break the loop of gather statements.", name);
         interp->had_runtime_error = true;
         return false;
     }
@@ -1671,6 +1690,7 @@ static bool interpreter_load_module(Interpreter *interp, const char *name, int l
     if (!interp->had_runtime_error) {
         lie_error_report(LIE_ERROR_RUNTIME, line, NULL, 0,
                          "Unknown library '%s'", name);
+        lie_error_hint("Ensure 'libs/%s.ls' exists or provide a native module with that name.", name);
         interp->had_runtime_error = true;
     }
     return false;
@@ -1699,7 +1719,8 @@ static Value eval_unary(Interpreter *interp, UnaryExpr unary) {
     switch (unary.op.type) {
         case TOKEN_MINUS:
             if (right.type != VALUE_NUMBER) {
-                runtime_error(interp, unary.op.line, "Unary '-' expects a number");
+                runtime_error(interp, unary.op.line, "Unary '-' expects a number",
+                                   "Ensure the expression after '-' evaluates to a number.");
                 value_free(right);
                 return value_nothing();
             }
@@ -1779,67 +1800,86 @@ static Value eval_binary(Interpreter *interp, BinaryExpr binary) {
             } else if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_number(left.as.number + right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '+' must be numbers or strings");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '+' must be numbers or strings",
+                                   "Convert both sides to matching types before adding.");
             }
             break;
         case TOKEN_MINUS:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_number(left.as.number - right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '-' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '-' must be numbers",
+                                   "Check that both expressions evaluate to numbers before subtracting.");
             }
             break;
         case TOKEN_STAR:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_number(left.as.number * right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '*' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '*' must be numbers",
+                                   "Multiply numeric values only; consider converting or validating inputs first.");
             }
             break;
         case TOKEN_SLASH:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 if (right.as.number == 0.0) {
-                    runtime_error(interp, binary.op.line, "Division by zero");
+                    runtime_error(interp, binary.op.line, "Division by zero",
+                                       "Guard the divisor or ensure it never becomes zero before dividing.");
                 } else {
                     result = value_number(left.as.number / right.as.number);
                 }
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '/' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '/' must be numbers",
+                                   "Double-check both sides of the division are numeric.");
             }
             break;
         case TOKEN_PERCENT:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_number(fmod(left.as.number, right.as.number));
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '%' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '%' must be numbers",
+                                   "Use numeric values when applying the remainder operator.");
             }
             break;
         case TOKEN_GREATER:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_bool(left.as.number > right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '>' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '>' must be numbers",
+                                   "Compare numeric quantities; for strings consider custom comparison helpers.");
             }
             break;
         case TOKEN_GREATER_EQUAL:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_bool(left.as.number >= right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '>=' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '>=' must be numbers",
+                                   "Ensure both expressions evaluate to numbers before comparing.");
             }
             break;
         case TOKEN_LESS:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_bool(left.as.number < right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '<' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '<' must be numbers",
+                                   "Consider converting your values to numbers prior to comparison.");
             }
             break;
         case TOKEN_LESS_EQUAL:
             if (left.type == VALUE_NUMBER && right.type == VALUE_NUMBER) {
                 result = value_bool(left.as.number <= right.as.number);
             } else {
-                runtime_error(interp, binary.op.line, "Operands to '<=' must be numbers");
+                runtime_error(interp, binary.op.line,
+                                   "Operands to '<=' must be numbers",
+                                   "Numbers are required on both sides of '<=' comparisons.");
             }
             break;
         case TOKEN_IS:
@@ -1849,7 +1889,8 @@ static Value eval_binary(Interpreter *interp, BinaryExpr binary) {
             result = value_bool(!value_equal(left, right));
             break;
         default:
-            runtime_error(interp, binary.op.line, "Unsupported binary operator");
+            runtime_error(interp, binary.op.line, "Unsupported binary operator",
+                               "This operator is not implemented yet; consider rewriting the expression.");
             break;
     }
 
@@ -1861,7 +1902,9 @@ static Value eval_binary(Interpreter *interp, BinaryExpr binary) {
 static Value eval_variable(Interpreter *interp, VariableExpr variable, int line) {
     Value value;
     if (!environment_get(interp->current, variable.name, &value)) {
-        runtime_error(interp, line, "Unknown name");
+        runtime_error(interp, line, "Unknown name",
+                           "Declare '%s' with 'let' before using it or gather the module that provides it.",
+                           variable.name);
         return value_nothing();
     }
     return value;
@@ -1897,7 +1940,12 @@ static Value eval_call(Interpreter *interp, CallExpr call, int line) {
     } else if (callee.type == VALUE_FUNCTION) {
         Function *function = callee.as.function;
         if (call.arg_count != function->declaration->param_count) {
-            runtime_error(interp, line, "Arity mismatch in call");
+            runtime_error(interp, line, "Arity mismatch in call",
+                               "The routine '%s' expects %zu argument%s but received %zu.",
+                               function->declaration->name,
+                               function->declaration->param_count,
+                               function->declaration->param_count == 1 ? "" : "s",
+                               call.arg_count);
         } else {
             Environment local;
             environment_init(&local, function->closure);
@@ -1924,7 +1972,8 @@ static Value eval_call(Interpreter *interp, CallExpr call, int line) {
             environment_free(&local);
         }
     } else {
-        runtime_error(interp, line, "Value is not callable");
+        runtime_error(interp, line, "Value is not callable",
+                           "Try adding parentheses to call the value or ensure it refers to a routine.");
     }
 
     for (size_t i = 0; i < call.arg_count; ++i) {
@@ -1974,7 +2023,9 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
             Value value = eval_expression(interp, stmt->as.set_stmt.value);
             if (!interp->had_runtime_error) {
                 if (!environment_assign(interp->current, stmt->as.set_stmt.name, value)) {
-                    runtime_error(interp, stmt->line, "Unknown name in 'set'");
+                    runtime_error(interp, stmt->line, "Unknown name in 'set'",
+                                       "Create '%s' with 'let' before attempting to update it.",
+                                       stmt->as.set_stmt.name);
                 }
             }
             value_free(value);
@@ -2023,7 +2074,8 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
         }
         case STMT_HALT: {
             if (interp->call_depth == 0) {
-                runtime_error(interp, stmt->line, "'halt' outside of a routine");
+                runtime_error(interp, stmt->line, "'halt' outside of a routine",
+                                   "Use 'halt' inside a routine declared with 'note'.");
                 return exec_result_none();
             }
             Value value;
@@ -2055,7 +2107,8 @@ static void execute_program(Interpreter *interp, Stmt **statements, size_t count
     for (size_t i = 0; i < count; ++i) {
         ExecResult result = execute_statement(interp, statements[i]);
         if (result.did_return) {
-            runtime_error(interp, statements[i]->line, "Unexpected 'halt' at top-level");
+            runtime_error(interp, statements[i]->line, "Unexpected 'halt' at top-level",
+                               "Only call 'halt' inside routines; wrap top-level work in 'note main(): ...'.");
             value_free(result.value);
             break;
         }

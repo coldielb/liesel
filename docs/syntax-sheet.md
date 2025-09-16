@@ -131,4 +131,5 @@ main()
 
 ## Current Implementation Status (alpha)
 - Implemented in the interpreter today: indentation-aware blocks (colon + leading spaces), nested routine declarations, `gather` with native/module loading cache, `let`, `set`, routines (`note` / `halt`), branching (`if` / `otherwise`), looping (`whilst`), expression statements, arithmetic/logic expressions, the `core::write_line` bridge + `io` library, booleans, numbers, strings, `nothing`, `and`/`or`/`not`.
+- Error handling now responds with contextual hints ("Hint:" lines) to guide fixes for common mistakes.
 - Planned next iterations: richer standard modules (`math`, `text`), structured data types, module packaging conventions (including versioning), resilient closures that survive scope exit, and future gradual typing.
