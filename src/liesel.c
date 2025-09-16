@@ -1938,11 +1938,212 @@ static Value native_core_write_line(Interpreter *interp, int arg_count, Value *a
     return value_nothing();
 }
 
+static Value native_core_length(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1) {
+        runtime_error(interp, line, "core::length expects exactly 1 argument",
+                      "Call it like core::length(value).");
+        return value_nothing();
+    }
+    Value target = args[0];
+    switch (target.type) {
+        case VALUE_STRING:
+            return value_number((double)strlen(target.as.string));
+        case VALUE_LIST:
+            return value_number((double)target.as.list.count);
+        case VALUE_RECORD:
+            return value_number((double)target.as.record.count);
+        default:
+            runtime_error(interp, line, "core::length only supports strings, lists, or records",
+                          "Provide a string, list, or record when calling core::length.");
+            return value_nothing();
+    }
+}
+
+static Value native_core_list_push(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 2) {
+        runtime_error(interp, line, "core::list_push expects exactly 2 arguments",
+                      "Usage: core::list_push(list, value).");
+        return value_nothing();
+    }
+    if (args[0].type != VALUE_LIST) {
+        runtime_error(interp, line, "core::list_push requires a list as the first argument",
+                      "Pass the list you wish to extend.");
+        return value_nothing();
+    }
+    Value result = value_list();
+    for (size_t i = 0; i < args[0].as.list.count; ++i) {
+        list_append(&result, value_copy(args[0].as.list.items[i]));
+    }
+    list_append(&result, value_copy(args[1]));
+    return result;
+}
+
+static Value native_core_record_put(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 3) {
+        runtime_error(interp, line, "core::record_put expects exactly 3 arguments",
+                      "Usage: core::record_put(record, key, value).");
+        return value_nothing();
+    }
+    if (args[0].type != VALUE_RECORD) {
+        runtime_error(interp, line, "core::record_put requires a record as the first argument",
+                      "Pass the record you wish to extend.");
+        return value_nothing();
+    }
+    if (args[1].type != VALUE_STRING) {
+        runtime_error(interp, line, "core::record_put expects a string key",
+                      "Convert the key to a string before updating the record.");
+        return value_nothing();
+    }
+
+    const char *key = args[1].as.string;
+    Value result = value_record();
+    bool replaced = false;
+    for (size_t i = 0; i < args[0].as.record.count; ++i) {
+        const char *existing = args[0].as.record.keys[i];
+        Value element = args[0].as.record.values[i];
+        if (!replaced && strcmp(existing, key) == 0) {
+            record_append(&result, existing, value_copy(args[2]));
+            replaced = true;
+        } else {
+            record_append(&result, existing, value_copy(element));
+        }
+    }
+    if (!replaced) {
+        record_append(&result, key, value_copy(args[2]));
+    }
+    return result;
+}
+
+static Value native_core_record_keys(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1 || args[0].type != VALUE_RECORD) {
+        runtime_error(interp, line, "core::record_keys expects a record argument",
+                      "Call it like core::record_keys(record).");
+        return value_nothing();
+    }
+    Value list = value_list();
+    for (size_t i = 0; i < args[0].as.record.count; ++i) {
+        list_append(&list, value_string(args[0].as.record.keys[i]));
+    }
+    return list;
+}
+
+static Value native_core_read_line(Interpreter *interp, int arg_count, Value *args, int line) {
+    UNUSED(args);
+    if (arg_count != 0) {
+        runtime_error(interp, line, "core::read_line expects no arguments",
+                      "Call it without parameters to read a line from input.");
+        return value_nothing();
+    }
+
+    size_t capacity = 128;
+    size_t length = 0;
+    char *buffer = (char *)malloc(capacity);
+    CHECK_ALLOC(buffer);
+
+    int ch;
+    while ((ch = fgetc(stdin)) != EOF && ch != '\n') {
+        if (length + 1 >= capacity) {
+            capacity *= 2;
+            char *new_buffer = (char *)realloc(buffer, capacity);
+            CHECK_ALLOC(new_buffer);
+            buffer = new_buffer;
+        }
+        buffer[length++] = (char)ch;
+    }
+
+    if (ch == EOF && length == 0) {
+        free(buffer);
+        runtime_error(interp, line, "End of input reached",
+                      "Provide input or redirect a file before calling core::read_line.");
+        return value_nothing();
+    }
+
+    buffer[length] = '\0';
+    Value result;
+    result.type = VALUE_STRING;
+    result.as.string = buffer;
+    return result;
+}
+
+static Value native_core_parse_number(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1 || args[0].type != VALUE_STRING) {
+        runtime_error(interp, line, "core::parse_number expects a single string argument",
+                      "Pass the raw text you wish to convert to a number.");
+        return value_nothing();
+    }
+    errno = 0;
+    char *end = NULL;
+    double number = strtod(args[0].as.string, &end);
+    while (end != NULL && isspace((unsigned char)*end)) {
+        end++;
+    }
+    if (end == args[0].as.string || (end != NULL && *end != '\0') || errno != 0) {
+        runtime_error(interp, line, "Unable to parse number",
+                      "Ensure the input looks like 42 or 3.14.");
+        return value_nothing();
+    }
+    return value_number(number);
+}
+
+static Value native_core_parse_boolean(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1 || args[0].type != VALUE_STRING) {
+        runtime_error(interp, line, "core::parse_boolean expects a single string argument",
+                      "Use values such as 'true' or 'false'.");
+        return value_nothing();
+    }
+    char *lower = duplicate_cstring(args[0].as.string);
+    for (char *p = lower; *p; ++p) {
+        *p = (char)tolower((unsigned char)*p);
+    }
+    Value result;
+    if (strcmp(lower, "true") == 0) {
+        result = value_bool(true);
+    } else if (strcmp(lower, "false") == 0) {
+        result = value_bool(false);
+    } else {
+        free(lower);
+        runtime_error(interp, line, "Unable to parse boolean",
+                      "Acceptable values are 'true' or 'false'.");
+        return value_nothing();
+    }
+    free(lower);
+    return result;
+}
+
 static bool load_native_module(Interpreter *interp, const char *name) {
     if (strcmp(name, "core") == 0) {
         Value write = value_native(native_core_write_line, "core::write_line");
         environment_define(interp->globals, "core::write_line", write);
         value_free(write);
+
+        Value length_fn = value_native(native_core_length, "core::length");
+        environment_define(interp->globals, "core::length", length_fn);
+        value_free(length_fn);
+
+        Value list_push = value_native(native_core_list_push, "core::list_push");
+        environment_define(interp->globals, "core::list_push", list_push);
+        value_free(list_push);
+
+        Value record_put = value_native(native_core_record_put, "core::record_put");
+        environment_define(interp->globals, "core::record_put", record_put);
+        value_free(record_put);
+
+        Value record_keys = value_native(native_core_record_keys, "core::record_keys");
+        environment_define(interp->globals, "core::record_keys", record_keys);
+        value_free(record_keys);
+
+        Value read_line = value_native(native_core_read_line, "core::read_line");
+        environment_define(interp->globals, "core::read_line", read_line);
+        value_free(read_line);
+
+        Value parse_number = value_native(native_core_parse_number, "core::parse_number");
+        environment_define(interp->globals, "core::parse_number", parse_number);
+        value_free(parse_number);
+
+        Value parse_boolean = value_native(native_core_parse_boolean, "core::parse_boolean");
+        environment_define(interp->globals, "core::parse_boolean", parse_boolean);
+        value_free(parse_boolean);
+
         return true;
     }
     return false;

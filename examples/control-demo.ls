@@ -1,18 +1,27 @@
 gather io
 
+gather list
+
+gather record
+
+note keep_even(value):
+    halt value % 2 is 0
+
 note main():
-    let numbers be [1, 2, 3, 4]
+    let values be list::range(1, 8)
+    let evens be list::filter(values, keep_even)
+
     let index be 0
-    whilst index < 4:
-        if numbers[index] is 3:
-            set index to index + 1
-            continue
-        if numbers[index] is 4:
+    whilst index < list::length(evens):
+        if evens[index] is 6:
             break
-        io::echo("value -> " + numbers[index])
+        io::echo("even -> " + evens[index])
         set index to index + 1
-    let person be { name be "Ada", age be 37 }
-    io::echo("name -> " + person["name"])
+
+    let base be { name be "Liesel" }
+    let detailed be record::set(base, "age", 14)
+    io::echo("has-age? -> " + record::has(detailed, "age"))
+    io::echo("age -> " + detailed["age"])
     halt nothing
 
 main()

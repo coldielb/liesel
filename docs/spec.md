@@ -106,6 +106,13 @@ recordField    → (IDENTIFIER | STRING) "be" expression
 ### 5.1 Native Modules
 - `core`:
   - `core::write_line(...)` — prints arguments separated by spaces with newline. Requires at least one argument.
+  - `core::length(value)` — returns the length of a string, list, or record.
+  - `core::list_push(list, value)` — produces a new list with `value` appended.
+  - `core::record_put(record, key, value)` — produces a new record with `key` updated.
+  - `core::record_keys(record)` — returns the list of keys defined on a record.
+  - `core::read_line()` — reads a single line from standard input (without trailing newline).
+  - `core::parse_number(text)` — converts text to a number.
+  - `core::parse_boolean(text)` — converts text to a boolean (`true`/`false`).
 
 ### 5.2 Script Modules
 - Stored under `libs/`. Executed the first time they are gathered; their top-level code runs, and any `note` definitions / bindings persist via stored ASTs.
@@ -115,6 +122,9 @@ recordField    → (IDENTIFIER | STRING) "be" expression
   - `math::floor(x)` — greatest integer ≤ `x`
   - `math::ceil(x)` — smallest integer ≥ `x`
   - Implemented entirely in Liesel using loops and comparisons; relies on `core` only for eventual display helpers.
+- `libs/io.ls` adds user input helpers: `io::echo`, `io::ask` (string), and `io::ask_as` (string/number/boolean).
+- `libs/list.ls` offers higher-level list helpers such as `list::length`, `list::append`, `list::map`, `list::filter`, and `list::range`.
+- `libs/record.ls` provides record utilities including `record::set`, `record::has`, `record::keys`, and `record::merge`.
 
 ## 6. Errors
 - Lexical, parse, runtime, and system errors emit `Hint:` lines with actionable suggestions.

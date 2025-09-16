@@ -125,7 +125,7 @@ note greet(person):
 ## Libraries & Modules
 - `gather <name>` loads each module once, first checking for native runtime bridges, then for a script library at `libs/<name>.ls`. Modules may depend on one another using nested `gather`.
 - The runtime ships with a tiny native `core` module that exposes host bridges (currently `core::write_line`) intended for library authors.
-- The user-facing `io` module lives in `libs/io.ls` and delegates to `core::write_line` to implement `io::echo`.
+- The user-facing `io` module lives in `libs/io.ls` and delegates to `core::write_line` to implement `io::echo`. It also offers `io::ask` / `io::ask_as` for typed input.
 - The `math` library lives in `libs/math.ls` and supplies constants and helpers such as `math::pi`, `math::abs`, `math::floor`, and `math::ceil`.
 
 ### Example Script
