@@ -2156,6 +2156,7 @@ static Value native_core_write_line(Interpreter *interp, int arg_count, Value *a
         free(text);
     }
     fputc('\n', stdout);
+    fflush(stdout);
     return value_nothing();
 }
 

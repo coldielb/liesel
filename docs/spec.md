@@ -136,6 +136,7 @@ recordField    → (IDENTIFIER | STRING) "be" expression
 - `examples/math-demo.ls` — demonstrates math library and closures.
 - `examples/control-demo.ls` — showcases break/continue and collection indexing.
 - `examples/fibonacci.ls` — showcases recursive definitions for Fibonacci numbers.
+- `examples/onboarding.ls` — interactive input capturing text and numeric responses via `io::ask` helpers.
 - `examples/error-intentional.ls` — triggers runtime arity error to showcase diagnostics.
 
 ## 8. Implementation Notes
