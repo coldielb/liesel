@@ -1,5 +1,5 @@
 #include "liesel.h"
-#include "error.h"
+#include "liesel/error.h"
 
 #include <ctype.h>
 #include <errno.h>
