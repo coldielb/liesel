@@ -10,9 +10,9 @@ This specification captures the behaviour of the current Liesel interpreter impl
 ## 2. Lexical Structure
 ### 2.1 Tokens
 - Identifiers: `[a-zA-Z_][a-zA-Z0-9_]*`. Qualified identifiers use `::` segments (e.g. `io::echo`).
-- Keywords: `note`, `let`, `set`, `be`, `to`, `if`, `otherwise`, `whilst`, `halt`, `gather`, `true`, `false`, `nothing`, `and`, `or`, `not`, `is`, `isnt`.
+- Keywords: `note`, `let`, `set`, `be`, `to`, `if`, `otherwise`, `whilst`, `halt`, `gather`, `true`, `false`, `nothing`, `and`, `or`, `not`, `is`, `isnt`, `break`, `continue`.
 - Literals: numbers (decimal, optional fractional part), strings (`"..."` with `\n`, `\t`, `\\`, `\"` escapes), booleans, `nothing`.
-- Operators/punctuation: `+ - * / %`, `< <= > >=`, `is`, `isnt`, `and`, `or`, parenthesis, commas, colon, `::`.
+- Operators/punctuation: `+ - * / %`, `< <= > >=`, `is`, `isnt`, `and`, `or`, parenthesis, brackets, braces, commas, colon, `::`.
 - Comments: `whisper ` begins a comment to end-of-line.
 
 ### 2.2 Whitespace & Indentation
@@ -27,7 +27,7 @@ program        → { declaration } EOF
 declaration    → gatherStmt | functionDecl | letDecl | setStmt | statement
 
 gatherStmt     → "gather" IDENTIFIER NEWLINE*
-functionDecl   → "note" IDENTIFIER "(" [ parameters ] ")" ":" block
+functionDecl   → "note" IDENTIFIER "(" [ parameters ] " )" " :" block
 parameters     → IDENTIFIER { "," IDENTIFIER }
 letDecl        → "let" IDENTIFIER "be" expression NEWLINE*
 setStmt        → "set" IDENTIFIER "to" expression NEWLINE*
@@ -37,32 +37,44 @@ statement      → exprStmt
                | whilstStmt
                | block
                | haltStmt
+               | breakStmt
+               | continueStmt
 
-ifStmt         → "if" expression ":" block [ "otherwise" ":" block ]
-whilstStmt     → "whilst" expression ":" block
+ifStmt         → "if" expression " :" block { "otherwise" elseClause }
+elseClause     → "if" expression " :" block
+               | " :" block
+whilstStmt     → "whilst" expression " :" block
 block          → NEWLINE INDENT { declaration } DEDENT
 haltStmt       → "halt" [ expression ] NEWLINE*
+breakStmt      → "break" NEWLINE*
+continueStmt   → "continue" NEWLINE*
 exprStmt       → expression NEWLINE*
-expression     → assignment
-assignment     → logic_or              // no '=' yet; uses let/set
+
+expression     → logic_or
 logic_or       → logic_and { "or" logic_and }
 logic_and      → equality { "and" equality }
 equality       → comparison { ("is" | "isnt") comparison }
-comparison     → term { ("<" | "<=" | ">" | ">=") term }
+comparison     → term { ("<" | "<=" | " >" | " >=") term }
 term           → factor { ("+" | "-") factor }
 factor         → unary { ("*" | "/" | "%") unary }
 unary          → ("not" | "-") unary | call
-call           → primary { "(" [ arguments ] ")" }
+call           → primary { "(" [ arguments ] " )" | "[" expression " ]" }
 arguments      → expression { "," expression }
 primary        → NUMBER | STRING | "true" | "false" | "nothing"
                | IDENTIFIER
-               | "(" expression ")"
+               | "(" expression " )"
+               | listLiteral
+               | recordLiteral
+listLiteral    → "[" [ expression { "," expression } ] " ]"
+recordLiteral  → "{" recordField { "," recordField } " }"
+recordField    → (IDENTIFIER | STRING) "be" expression
 ```
+
 
 ## 4. Runtime Semantics
 ### 4.1 Values
-- Dynamic typing with the following variants: number (double), string (owned copy), boolean, nothing, native function, user routine.
-- Truthiness: numbers (`0` false, others true), strings (empty false), booleans (as-is), nothing (false), natives/routines (true).
+- Dynamic typing with the following variants: number (double), string (owned copy), boolean, nothing, list, record, native function, user routine.
+- Truthiness: numbers (`0` false, others true), strings (empty false), booleans (as-is), nothing (false), lists/records (true when non-empty), natives/routines (true).
 
 ### 4.2 Environments & Scope
 - Each block (`block`) introduces a new environment that chains to the enclosing environment.
@@ -77,10 +89,12 @@ primary        → NUMBER | STRING | "true" | "false" | "nothing"
 - Arithmetic operators require numbers (string concatenation via `+` is supported when either operand is string). Errors produce runtime hints.
 - Division by zero is a runtime error.
 - Equality uses value semantics (type-sensitive equality, strings by contents).
+- Indexing with `[ ]` retrieves list elements by integer index or record fields by string key.
 
 ### 4.4 Control Flow
 - `if`/`otherwise` evaluate truthiness of the condition.
 - `whilst` loops until condition becomes falsy; `halt` inside a loop returns from the innermost routine.
+- `break` exits the current `whilst`; `continue` skips directly to the next iteration.
 - `halt` outside a routine triggers a runtime error.
 
 ## 5. Modules & Libraries
@@ -110,6 +124,7 @@ primary        → NUMBER | STRING | "true" | "false" | "nothing"
 - `examples/hello.ls` — simple IO and loops.
 - `examples/story.ls` — nested loops with helper routine.
 - `examples/math-demo.ls` — demonstrates math library and closures.
+- `examples/control-demo.ls` — showcases break/continue and collection indexing.
 - `examples/error-intentional.ls` — triggers runtime arity error to showcase diagnostics.
 
 ## 8. Implementation Notes

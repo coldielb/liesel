@@ -80,6 +80,14 @@ if mood is "hopeful":
 otherwise:
     set tone to "soft"
 ```
+```
+if mood is "bright":
+    set tone to "sunny"
+otherwise if mood is "soft":
+    set tone to "muted"
+otherwise:
+    set tone to "unknown"
+```
 
 ### Loop
 ```
@@ -87,6 +95,7 @@ whilst count > 0:
     io::echo("Counting: " + count)
     set count to count - 1
 ```
+- `break` exits the current loop; `continue` skips to the next iteration.
 
 ### Routine Definition
 ```
@@ -97,6 +106,11 @@ note greet(person):
 - `halt` exits the routine. If omitted, `nothing` is returned by default.
 - Routines may now be declared inside other routines or blocks for helper logic (escaping closures are on the roadmap).
 - Inner routines capture surrounding bindings, allowing simple closures over local state.
+
+## Collections
+- **Lists** use bracket literals: `let items be [1, 2, 3]`.
+- **Records** use braces with `be`: `let person be { name be "Liesel", age be 14 }`.
+- Index with square brackets: `items[0]`, `person["name"]`.
 
 ## Scope & Closures
 - Every indented block (`if`, `whilst`, or explicit blocks) creates a new scope chained to its parent.

@@ -38,6 +38,10 @@ static char *duplicate_cstring(const char *text) {
 typedef enum {
     TOKEN_LEFT_PAREN,
     TOKEN_RIGHT_PAREN,
+    TOKEN_LEFT_BRACKET,
+    TOKEN_RIGHT_BRACKET,
+    TOKEN_LEFT_BRACE,
+    TOKEN_RIGHT_BRACE,
     TOKEN_COMMA,
     TOKEN_COLON,
     TOKEN_PLUS,
@@ -65,6 +69,8 @@ typedef enum {
     TOKEN_AND,
     TOKEN_OR,
     TOKEN_NOT,
+    TOKEN_BREAK,
+    TOKEN_CONTINUE,
     TOKEN_IS,
     TOKEN_ISNT,
     TOKEN_IF,
@@ -222,6 +228,8 @@ static TokenType keyword_type(const char *start, size_t length) {
         {"whilst", TOKEN_WHILST},
         {"note", TOKEN_NOTE},
         {"halt", TOKEN_HALT},
+        {"break", TOKEN_BREAK},
+        {"continue", TOKEN_CONTINUE},
     };
     for (size_t i = 0; i < sizeof(keywords) / sizeof(keywords[0]); ++i) {
         if (length == strlen(keywords[i].text) && strncmp(start, keywords[i].text, length) == 0) {
@@ -387,6 +395,14 @@ static Token lexer_next_token(Lexer *lexer) {
             return make_token(lexer, TOKEN_LEFT_PAREN);
         case ')':
             return make_token(lexer, TOKEN_RIGHT_PAREN);
+        case '[':
+            return make_token(lexer, TOKEN_LEFT_BRACKET);
+        case ']':
+            return make_token(lexer, TOKEN_RIGHT_BRACKET);
+        case '{':
+            return make_token(lexer, TOKEN_LEFT_BRACE);
+        case '}':
+            return make_token(lexer, TOKEN_RIGHT_BRACE);
         case ',':
             return make_token(lexer, TOKEN_COMMA);
         case ':':
@@ -460,7 +476,10 @@ typedef enum {
     EXPR_UNARY,
     EXPR_BINARY,
     EXPR_VARIABLE,
-    EXPR_CALL
+    EXPR_CALL,
+    EXPR_LIST,
+    EXPR_RECORD,
+    EXPR_INDEX
 } ExprType;
 
 typedef enum {
@@ -500,6 +519,22 @@ typedef struct {
     size_t arg_count;
 } CallExpr;
 
+typedef struct {
+    Expr **elements;
+    size_t count;
+} ListExpr;
+
+typedef struct {
+    char **keys;
+    Expr **values;
+    size_t count;
+} RecordExpr;
+
+typedef struct {
+    Expr *collection;
+    Expr *index;
+} IndexExpr;
+
 struct Expr {
     ExprType type;
     int line;
@@ -510,6 +545,9 @@ struct Expr {
         BinaryExpr binary;
         VariableExpr variable;
         CallExpr call;
+        ListExpr list;
+        RecordExpr record;
+        IndexExpr index;
     } as;
 };
 
@@ -522,7 +560,9 @@ typedef enum {
     STMT_IF,
     STMT_WHILST,
     STMT_FUNCTION,
-    STMT_HALT
+    STMT_HALT,
+    STMT_BREAK,
+    STMT_CONTINUE
 } StmtType;
 
 typedef struct Stmt Stmt;
@@ -591,6 +631,7 @@ typedef struct {
     size_t count;
     size_t current;
     bool had_error;
+    int loop_depth;
 } Parser;
 
 static void parser_init(Parser *parser, Token *tokens, size_t count) {
@@ -598,6 +639,7 @@ static void parser_init(Parser *parser, Token *tokens, size_t count) {
     parser->count = count;
     parser->current = 0;
     parser->had_error = false;
+    parser->loop_depth = 0;
 }
 
 static Token parser_peek(Parser *parser) {
@@ -671,6 +713,10 @@ static Expr *parse_primary(Parser *parser);
 static Stmt *parse_declaration(Parser *parser);
 static Stmt *parse_statement(Parser *parser);
 static Stmt *parse_block(Parser *parser);
+static Expr *parse_list_literal(Parser *parser, Token left_bracket);
+static Expr *parse_record_literal(Parser *parser, Token left_brace);
+static Stmt *parse_break_statement(Parser *parser, Token keyword);
+static Stmt *parse_continue_statement(Parser *parser, Token keyword);
 static Stmt **parse_program(Parser *parser, size_t *out_count);
 
 static Expr *new_expr(ExprType type, int line) {
@@ -742,43 +788,148 @@ static Expr *parse_primary(Parser *parser) {
         parser_consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after expression");
         return expr;
     }
+    if (parser_match(parser, TOKEN_LEFT_BRACKET)) {
+        return parse_list_literal(parser, parser_previous(parser));
+    }
+    if (parser_match(parser, TOKEN_LEFT_BRACE)) {
+        return parse_record_literal(parser, parser_previous(parser));
+    }
 
     parser_error_at(parser, parser_peek(parser), "Expected expression");
     return NULL;
+}
+
+static Expr *parse_list_literal(Parser *parser, Token left_bracket) {
+    Expr *expr = new_expr(EXPR_LIST, left_bracket.line);
+    expr->as.list.elements = NULL;
+    expr->as.list.count = 0;
+    size_t capacity = 0;
+
+    if (!parser_check(parser, TOKEN_RIGHT_BRACKET)) {
+        do {
+            Expr *element = parse_expression(parser);
+            if (expr->as.list.count + 1 > capacity) {
+                size_t new_capacity = capacity < 4 ? 4 : capacity * 2;
+                Expr **new_elements = (Expr **)realloc(expr->as.list.elements, new_capacity * sizeof(Expr *));
+                CHECK_ALLOC(new_elements);
+                expr->as.list.elements = new_elements;
+                capacity = new_capacity;
+            }
+            expr->as.list.elements[expr->as.list.count++] = element;
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    parser_consume(parser, TOKEN_RIGHT_BRACKET, "Expect ']' after list literal");
+    return expr;
+}
+
+static Expr *parse_record_literal(Parser *parser, Token left_brace) {
+    Expr *expr = new_expr(EXPR_RECORD, left_brace.line);
+    expr->as.record.keys = NULL;
+    expr->as.record.values = NULL;
+    expr->as.record.count = 0;
+    size_t capacity = 0;
+
+    if (!parser_check(parser, TOKEN_RIGHT_BRACE)) {
+        do {
+            Token key_token = parser_peek(parser);
+            char *key = NULL;
+            if (parser_match(parser, TOKEN_IDENTIFIER)) {
+                key = copy_string(key_token.start, key_token.length);
+            } else if (parser_match(parser, TOKEN_STRING)) {
+                key = copy_string(key_token.start + 1, key_token.length - 2);
+            } else {
+                parser_error_at(parser, key_token, "Expected field name in record");
+                lie_error_hint("Use an identifier or string literal before 'be'.");
+                key = duplicate_cstring("");
+            }
+            parser_consume(parser, TOKEN_BE, "Expect 'be' after record field name");
+            Expr *value = parse_expression(parser);
+
+            if (expr->as.record.count + 1 > capacity) {
+                size_t new_capacity = capacity < 4 ? 4 : capacity * 2;
+                char **new_keys = (char **)realloc(expr->as.record.keys, new_capacity * sizeof(char *));
+                CHECK_ALLOC(new_keys);
+                expr->as.record.keys = new_keys;
+                Expr **new_values = (Expr **)realloc(expr->as.record.values, new_capacity * sizeof(Expr *));
+                CHECK_ALLOC(new_values);
+                expr->as.record.values = new_values;
+                capacity = new_capacity;
+            }
+            expr->as.record.keys[expr->as.record.count] = key;
+            expr->as.record.values[expr->as.record.count] = value;
+            expr->as.record.count++;
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    parser_consume(parser, TOKEN_RIGHT_BRACE, "Expect '}' after record literal");
+    return expr;
+}
+
+static Stmt *parse_break_statement(Parser *parser, Token keyword) {
+    if (parser->loop_depth == 0) {
+        parser_error_at(parser, keyword, "'break' outside of a loop");
+    }
+    Stmt *stmt = new_stmt(STMT_BREAK, keyword.line);
+    return stmt;
+}
+
+static Stmt *parse_continue_statement(Parser *parser, Token keyword) {
+    if (parser->loop_depth == 0) {
+        parser_error_at(parser, keyword, "'continue' outside of a loop");
+    }
+    Stmt *stmt = new_stmt(STMT_CONTINUE, keyword.line);
+    return stmt;
 }
 
 static Expr *parse_call(Parser *parser) {
     Expr *expr = parse_primary(parser);
     if (expr == NULL) return NULL;
 
-    while (parser_match(parser, TOKEN_LEFT_PAREN)) {
-        Expr *call = new_expr(EXPR_CALL, parser_previous(parser).line);
-        call->as.call.callee = expr;
-        call->as.call.arguments = NULL;
-        call->as.call.arg_count = 0;
-        size_t capacity = 0;
+    for (;;) {
+        if (parser_match(parser, TOKEN_LEFT_PAREN)) {
+            Expr *call = new_expr(EXPR_CALL, parser_previous(parser).line);
+            call->as.call.callee = expr;
+            call->as.call.arguments = NULL;
+            call->as.call.arg_count = 0;
+            size_t capacity = 0;
 
-        if (!parser_check(parser, TOKEN_RIGHT_PAREN)) {
-            do {
-                Expr *argument = parse_expression(parser);
-                if (argument == NULL) {
-                    parser_error_at(parser, parser_peek(parser), "Invalid argument");
-                }
-                size_t count = call->as.call.arg_count;
-                if (count + 1 > capacity) {
-                    size_t new_capacity = capacity < 4 ? 4 : capacity * 2;
-                    Expr **new_args = (Expr **)realloc(call->as.call.arguments, new_capacity * sizeof(Expr *));
-                    CHECK_ALLOC(new_args);
-                    call->as.call.arguments = new_args;
-                    capacity = new_capacity;
-                }
-                call->as.call.arguments[count] = argument;
-                call->as.call.arg_count++;
-            } while (parser_match(parser, TOKEN_COMMA));
+            if (!parser_check(parser, TOKEN_RIGHT_PAREN)) {
+                do {
+                    Expr *argument = parse_expression(parser);
+                    if (argument == NULL) {
+                        parser_error_at(parser, parser_peek(parser), "Invalid argument");
+                    }
+                    size_t count = call->as.call.arg_count;
+                    if (count + 1 > capacity) {
+                        size_t new_capacity = capacity < 4 ? 4 : capacity * 2;
+                        Expr **new_args = (Expr **)realloc(call->as.call.arguments, new_capacity * sizeof(Expr *));
+                        CHECK_ALLOC(new_args);
+                        call->as.call.arguments = new_args;
+                        capacity = new_capacity;
+                    }
+                    call->as.call.arguments[count] = argument;
+                    call->as.call.arg_count++;
+                } while (parser_match(parser, TOKEN_COMMA));
+            }
+
+            parser_consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after arguments");
+            expr = call;
+            continue;
         }
 
-        parser_consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after arguments");
-        expr = call;
+        if (parser_match(parser, TOKEN_LEFT_BRACKET)) {
+            Token bracket = parser_previous(parser);
+            Expr *index = parse_expression(parser);
+            parser_consume(parser, TOKEN_RIGHT_BRACKET, "Expect ']' after index expression");
+            Expr *index_expr = new_expr(EXPR_INDEX, bracket.line);
+            index_expr->as.index.collection = expr;
+            index_expr->as.index.index = index;
+            expr = index_expr;
+            continue;
+        }
+
+        break;
     }
 
     return expr;
@@ -978,9 +1129,15 @@ static Stmt *parse_if_statement(Parser *parser, Token keyword) {
     Stmt *else_branch = NULL;
     if (parser_match(parser, TOKEN_OTHERWISE)) {
         Token otherwise_token = parser_previous(parser);
-        parser_consume(parser, TOKEN_COLON, "Expect ':' after 'otherwise'");
-        else_branch = parse_block(parser);
-        else_branch->line = otherwise_token.line;
+        if (parser_match(parser, TOKEN_IF)) {
+            Token else_if_token = parser_previous(parser);
+            else_branch = parse_if_statement(parser, else_if_token);
+            else_branch->line = otherwise_token.line;
+        } else {
+            parser_consume(parser, TOKEN_COLON, "Expect ':' after 'otherwise'");
+            else_branch = parse_block(parser);
+            else_branch->line = otherwise_token.line;
+        }
     }
 
     Stmt *stmt = new_stmt(STMT_IF, keyword.line);
@@ -991,9 +1148,11 @@ static Stmt *parse_if_statement(Parser *parser, Token keyword) {
 }
 
 static Stmt *parse_whilst_statement(Parser *parser, Token keyword) {
+    parser->loop_depth++;
     Expr *condition = parse_expression(parser);
     parser_consume(parser, TOKEN_COLON, "Expect ':' after condition");
     Stmt *body = parse_block(parser);
+    parser->loop_depth--;
 
     Stmt *stmt = new_stmt(STMT_WHILST, keyword.line);
     stmt->as.whilst.condition = condition;
@@ -1073,6 +1232,14 @@ static Stmt *parse_statement(Parser *parser) {
         Token keyword = parser_previous(parser);
         return parse_halt_statement(parser, keyword);
     }
+    if (parser_match(parser, TOKEN_BREAK)) {
+        Token keyword = parser_previous(parser);
+        return parse_break_statement(parser, keyword);
+    }
+    if (parser_match(parser, TOKEN_CONTINUE)) {
+        Token keyword = parser_previous(parser);
+        return parse_continue_statement(parser, keyword);
+    }
 
     Expr *expr = parse_expression(parser);
     if (expr == NULL) return NULL;
@@ -1151,7 +1318,9 @@ typedef enum {
     VALUE_STRING,
     VALUE_NOTHING,
     VALUE_NATIVE,
-    VALUE_FUNCTION
+    VALUE_FUNCTION,
+    VALUE_LIST,
+    VALUE_RECORD
 } ValueType;
 
 typedef struct Value Value;
@@ -1163,6 +1332,19 @@ typedef struct {
     const char *name;
 } Native;
 
+typedef struct {
+    Value *items;
+    size_t count;
+    size_t capacity;
+} ListData;
+
+typedef struct {
+    char **keys;
+    Value *values;
+    size_t count;
+    size_t capacity;
+} RecordData;
+
 struct Value {
     ValueType type;
     union {
@@ -1171,6 +1353,8 @@ struct Value {
         char *string;
         Native native;
         Function *function;
+        ListData list;
+        RecordData record;
     } as;
 };
 
@@ -1216,6 +1400,63 @@ static Value value_nothing(void) {
     return v;
 }
 
+static Value value_list(void) {
+    Value v;
+    v.type = VALUE_LIST;
+    v.as.list.items = NULL;
+    v.as.list.count = 0;
+    v.as.list.capacity = 0;
+    return v;
+}
+
+static Value value_record(void) {
+    Value v;
+    v.type = VALUE_RECORD;
+    v.as.record.keys = NULL;
+    v.as.record.values = NULL;
+    v.as.record.count = 0;
+    v.as.record.capacity = 0;
+    return v;
+}
+
+static void list_append(Value *list, Value value) {
+    if (list->type != VALUE_LIST) return;
+    if (list->as.list.count + 1 > list->as.list.capacity) {
+        size_t new_capacity = list->as.list.capacity < 4 ? 4 : list->as.list.capacity * 2;
+        Value *items = (Value *)realloc(list->as.list.items, new_capacity * sizeof(Value));
+        CHECK_ALLOC(items);
+        list->as.list.items = items;
+        list->as.list.capacity = new_capacity;
+    }
+    list->as.list.items[list->as.list.count++] = value;
+}
+
+static ssize_t record_find_index(const RecordData *record, const char *key) {
+    for (size_t i = 0; i < record->count; ++i) {
+        if (strcmp(record->keys[i], key) == 0) {
+            return (ssize_t)i;
+        }
+    }
+    return -1;
+}
+
+static void record_append(Value *record, const char *key, Value value) {
+    if (record->type != VALUE_RECORD) return;
+    if (record->as.record.count + 1 > record->as.record.capacity) {
+        size_t new_capacity = record->as.record.capacity < 4 ? 4 : record->as.record.capacity * 2;
+        char **keys = (char **)realloc(record->as.record.keys, new_capacity * sizeof(char *));
+        CHECK_ALLOC(keys);
+        record->as.record.keys = keys;
+        Value *values = (Value *)realloc(record->as.record.values, new_capacity * sizeof(Value));
+        CHECK_ALLOC(values);
+        record->as.record.values = values;
+        record->as.record.capacity = new_capacity;
+    }
+    record->as.record.keys[record->as.record.count] = duplicate_cstring(key);
+    record->as.record.values[record->as.record.count] = value;
+    record->as.record.count++;
+}
+
 static Value value_native(NativeFn fn, const char *name) {
     Value v;
     v.type = VALUE_NATIVE;
@@ -1246,6 +1487,20 @@ static Value value_copy(Value src) {
         case VALUE_FUNCTION:
             src.as.function->refcount++;
             return value_function(src.as.function);
+        case VALUE_LIST: {
+            Value copy = value_list();
+            for (size_t i = 0; i < src.as.list.count; ++i) {
+                list_append(&copy, value_copy(src.as.list.items[i]));
+            }
+            return copy;
+        }
+        case VALUE_RECORD: {
+            Value copy = value_record();
+            for (size_t i = 0; i < src.as.record.count; ++i) {
+                record_append(&copy, src.as.record.keys[i], value_copy(src.as.record.values[i]));
+            }
+            return copy;
+        }
     }
     return value_nothing();
 }
@@ -1268,6 +1523,22 @@ static void value_free(Value value) {
                 function_free(value.as.function);
             }
             break;
+        case VALUE_LIST: {
+            for (size_t i = 0; i < value.as.list.count; ++i) {
+                value_free(value.as.list.items[i]);
+            }
+            free(value.as.list.items);
+            break;
+        }
+        case VALUE_RECORD: {
+            for (size_t i = 0; i < value.as.record.count; ++i) {
+                free(value.as.record.keys[i]);
+                value_free(value.as.record.values[i]);
+            }
+            free(value.as.record.keys);
+            free(value.as.record.values);
+            break;
+        }
         default:
             break;
     }
@@ -1286,6 +1557,10 @@ static bool value_is_truthy(Value value) {
         case VALUE_NATIVE:
         case VALUE_FUNCTION:
             return true;
+        case VALUE_LIST:
+            return value.as.list.count > 0;
+        case VALUE_RECORD:
+            return value.as.record.count > 0;
     }
     return false;
 }
@@ -1313,6 +1588,31 @@ static bool value_equal(Value left, Value right) {
             return left.as.native.fn == right.as.native.fn;
         case VALUE_FUNCTION:
             return left.as.function == right.as.function;
+        case VALUE_LIST:
+            if (left.as.list.count != right.as.list.count) {
+                return false;
+            }
+            for (size_t i = 0; i < left.as.list.count; ++i) {
+                if (!value_equal(left.as.list.items[i], right.as.list.items[i])) {
+                    return false;
+                }
+            }
+            return true;
+        case VALUE_RECORD:
+            if (left.as.record.count != right.as.record.count) {
+                return false;
+            }
+            for (size_t i = 0; i < left.as.record.count; ++i) {
+                const char *key = left.as.record.keys[i];
+                ssize_t index = record_find_index(&right.as.record, key);
+                if (index < 0) {
+                    return false;
+                }
+                if (!value_equal(left.as.record.values[i], right.as.record.values[index])) {
+                    return false;
+                }
+            }
+            return true;
     }
     return false;
 }
@@ -1334,6 +1634,16 @@ static char *value_to_string(Value value) {
             return duplicate_cstring(value.as.native.name);
         case VALUE_FUNCTION:
             return duplicate_cstring(value.as.function->declaration->name);
+        case VALUE_LIST: {
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "[list %zu]", value.as.list.count);
+            return duplicate_cstring(buffer);
+        }
+        case VALUE_RECORD: {
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "{record %zu}", value.as.record.count);
+            return duplicate_cstring(buffer);
+        }
     }
     return duplicate_cstring("nothing");
 }
@@ -1531,8 +1841,15 @@ static void program_store_push(ProgramStore *store, Stmt **statements, size_t co
 
 /* ========================= INTERPRETER ========================= */
 
+typedef enum {
+    EXEC_FLOW_NONE,
+    EXEC_FLOW_RETURN,
+    EXEC_FLOW_BREAK,
+    EXEC_FLOW_CONTINUE
+} ExecFlow;
+
 typedef struct {
-    bool did_return;
+    ExecFlow flow;
     Value value;
 } ExecResult;
 
@@ -1541,6 +1858,7 @@ struct Interpreter {
     Environment *current;
     bool had_runtime_error;
     int call_depth;
+    int loop_depth;
     StringList loaded_modules;
     StringList loading_modules;
     ProgramStore stored_programs;
@@ -1548,14 +1866,14 @@ struct Interpreter {
 
 static ExecResult exec_result_none(void) {
     ExecResult result;
-    result.did_return = false;
+    result.flow = EXEC_FLOW_NONE;
     result.value = value_nothing();
     return result;
 }
 
 static ExecResult exec_result_value(Value value) {
     ExecResult result;
-    result.did_return = true;
+    result.flow = EXEC_FLOW_RETURN;
     result.value = value;
     return result;
 }
@@ -1565,6 +1883,7 @@ static void interpreter_init(Interpreter *interp) {
     interp->current = interp->globals;
     interp->had_runtime_error = false;
     interp->call_depth = 0;
+    interp->loop_depth = 0;
     string_list_init(&interp->loaded_modules);
     string_list_init(&interp->loading_modules);
     program_store_init(&interp->stored_programs);
@@ -1982,7 +2301,7 @@ static Value eval_call(Interpreter *interp, CallExpr call, int line) {
             interp->call_depth--;
             interp->current = previous;
 
-            if (exec.did_return) {
+            if (exec.flow == EXEC_FLOW_RETURN) {
                 result = exec.value;
             } else {
                 result = value_nothing();
@@ -2020,6 +2339,98 @@ static Value eval_expression(Interpreter *interp, Expr *expr) {
             return eval_variable(interp, expr->as.variable, expr->line);
         case EXPR_CALL:
             return eval_call(interp, expr->as.call, expr->line);
+        case EXPR_LIST: {
+            Value list = value_list();
+            for (size_t i = 0; i < expr->as.list.count; ++i) {
+                Expr *element_expr = expr->as.list.elements[i];
+                Value element = eval_expression(interp, element_expr);
+                if (interp->had_runtime_error) {
+                    value_free(element);
+                    value_free(list);
+                    return value_nothing();
+                }
+                list_append(&list, element);
+            }
+            return list;
+        }
+        case EXPR_RECORD: {
+            Value record = value_record();
+            for (size_t i = 0; i < expr->as.record.count; ++i) {
+                const char *key = expr->as.record.keys[i];
+                Expr *value_expr = expr->as.record.values[i];
+                Value field = eval_expression(interp, value_expr);
+                if (interp->had_runtime_error) {
+                    value_free(field);
+                    value_free(record);
+                    return value_nothing();
+                }
+                record_append(&record, key, field);
+            }
+            return record;
+        }
+        case EXPR_INDEX: {
+            Value collection = eval_expression(interp, expr->as.index.collection);
+            if (interp->had_runtime_error) {
+                value_free(collection);
+                return value_nothing();
+            }
+            Value index = eval_expression(interp, expr->as.index.index);
+            if (interp->had_runtime_error) {
+                value_free(collection);
+                value_free(index);
+                return value_nothing();
+            }
+
+            Value result = value_nothing();
+            if (collection.type == VALUE_LIST) {
+                if (index.type != VALUE_NUMBER) {
+                    runtime_error(interp, expr->line, "List indices must be numbers",
+                                  "Pass a numeric index when indexing a list.");
+                } else {
+                    double idx_double = index.as.number;
+                    double floored = floor(idx_double);
+                    if (idx_double != floored) {
+                        runtime_error(interp, expr->line, "List index must be an integer",
+                                      "Use whole numbers when indexing lists.");
+                    } else {
+                        ssize_t idx = (ssize_t)floored;
+                        if (idx < 0 || (size_t)idx >= collection.as.list.count) {
+                            runtime_error(interp, expr->line, "List index out of bounds",
+                                          "Valid indices range from 0 to %zu.",
+                                          collection.as.list.count == 0 ? 0 : collection.as.list.count - 1);
+                        } else {
+                            result = value_copy(collection.as.list.items[idx]);
+                        }
+                    }
+                }
+            } else if (collection.type == VALUE_RECORD) {
+                const char *key_ref = NULL;
+                char *owned_key = NULL;
+                if (index.type == VALUE_STRING) {
+                    key_ref = index.as.string;
+                } else {
+                    owned_key = value_to_string(index);
+                    key_ref = owned_key;
+                }
+                if (key_ref != NULL) {
+                    ssize_t entry = record_find_index(&collection.as.record, key_ref);
+                    if (entry < 0) {
+                        runtime_error(interp, expr->line, "Record key not found",
+                                      "No field named '%s' exists in this record.", key_ref);
+                    } else {
+                        result = value_copy(collection.as.record.values[entry]);
+                    }
+                }
+                free(owned_key);
+            } else {
+                runtime_error(interp, expr->line, "Cannot index value",
+                              "Only lists and records support indexing with '[ ]'.");
+            }
+
+            value_free(collection);
+            value_free(index);
+            return result;
+        }
     }
     return value_nothing();
 }
@@ -2043,8 +2454,8 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
             if (!interp->had_runtime_error) {
                 if (!environment_assign(interp->current, stmt->as.set_stmt.name, value)) {
                     runtime_error(interp, stmt->line, "Unknown name in 'set'",
-                                       "Create '%s' with 'let' before attempting to update it.",
-                                       stmt->as.set_stmt.name);
+                                   "Create '%s' with 'let' before attempting to update it.",
+                                   stmt->as.set_stmt.name);
                 }
             }
             value_free(value);
@@ -2061,6 +2472,9 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
             Value condition = eval_expression(interp, stmt->as.if_stmt.condition);
             bool truth = value_is_truthy(condition);
             value_free(condition);
+            if (interp->had_runtime_error) {
+                return exec_result_none();
+            }
             if (truth) {
                 return execute_statement(interp, stmt->as.if_stmt.then_branch);
             }
@@ -2070,6 +2484,8 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
             return exec_result_none();
         }
         case STMT_WHILST: {
+            interp->loop_depth++;
+            ExecResult loop_result = exec_result_none();
             while (true) {
                 Value condition = eval_expression(interp, stmt->as.whilst.condition);
                 bool truth = value_is_truthy(condition);
@@ -2078,11 +2494,27 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
                     break;
                 }
                 ExecResult body_result = execute_statement(interp, stmt->as.whilst.body);
-                if (body_result.did_return) {
-                    return body_result;
+                if (body_result.flow == EXEC_FLOW_RETURN) {
+                    loop_result = body_result;
+                    break;
+                }
+                if (body_result.flow == EXEC_FLOW_BREAK) {
+                    loop_result = exec_result_none();
+                    break;
+                }
+                if (body_result.flow == EXEC_FLOW_CONTINUE) {
+                    continue;
+                }
+                if (body_result.flow != EXEC_FLOW_NONE) {
+                    loop_result = body_result;
+                    break;
+                }
+                if (interp->had_runtime_error) {
+                    break;
                 }
             }
-            return exec_result_none();
+            interp->loop_depth--;
+            return loop_result;
         }
         case STMT_FUNCTION: {
             Function *function = function_new(&stmt->as.function, interp->current);
@@ -2094,7 +2526,7 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
         case STMT_HALT: {
             if (interp->call_depth == 0) {
                 runtime_error(interp, stmt->line, "'halt' outside of a routine",
-                                   "Use 'halt' inside a routine declared with 'note'.");
+                               "Use 'halt' inside a routine declared with 'note'.");
                 return exec_result_none();
             }
             Value value;
@@ -2104,6 +2536,26 @@ static ExecResult execute_statement(Interpreter *interp, Stmt *stmt) {
                 value = value_nothing();
             }
             return exec_result_value(value);
+        }
+        case STMT_BREAK: {
+            if (interp->loop_depth == 0) {
+                runtime_error(interp, stmt->line, "'break' outside of a loop",
+                               "Only use 'break' within 'whilst' blocks.");
+                return exec_result_none();
+            }
+            ExecResult result = exec_result_none();
+            result.flow = EXEC_FLOW_BREAK;
+            return result;
+        }
+        case STMT_CONTINUE: {
+            if (interp->loop_depth == 0) {
+                runtime_error(interp, stmt->line, "'continue' outside of a loop",
+                               "Only use 'continue' within 'whilst' blocks.");
+                return exec_result_none();
+            }
+            ExecResult result = exec_result_none();
+            result.flow = EXEC_FLOW_CONTINUE;
+            return result;
         }
     }
     return exec_result_none();
@@ -2117,7 +2569,7 @@ static ExecResult execute_block(Interpreter *interp, BlockStmt *block) {
     ExecResult result = exec_result_none();
     for (size_t i = 0; i < block->count; ++i) {
         result = execute_statement(interp, block->statements[i]);
-        if (result.did_return || interp->had_runtime_error) {
+        if (result.flow != EXEC_FLOW_NONE || interp->had_runtime_error) {
             break;
         }
     }
@@ -2125,19 +2577,21 @@ static ExecResult execute_block(Interpreter *interp, BlockStmt *block) {
     interp->current = previous;
     environment_release(local);
 
-    if (result.did_return) {
-        return result;
-    }
-    return exec_result_none();
+    return result;
 }
 
 static void execute_program(Interpreter *interp, Stmt **statements, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         ExecResult result = execute_statement(interp, statements[i]);
-        if (result.did_return) {
+        if (result.flow == EXEC_FLOW_RETURN) {
             runtime_error(interp, statements[i]->line, "Unexpected 'halt' at top-level",
-                               "Only call 'halt' inside routines; wrap top-level work in 'note main(): ...'.");
+                           "Only call 'halt' inside routines; wrap top-level work in 'note main(): ...'.");
             value_free(result.value);
+            break;
+        }
+        if (result.flow == EXEC_FLOW_BREAK || result.flow == EXEC_FLOW_CONTINUE) {
+            runtime_error(interp, statements[i]->line, "Loop control outside of a loop",
+                           "Use 'break' or 'continue' only inside 'whilst' blocks.");
             break;
         }
         if (interp->had_runtime_error) {
@@ -2175,6 +2629,24 @@ static void free_expr(Expr *expr) {
                 free_expr(expr->as.call.arguments[i]);
             }
             free(expr->as.call.arguments);
+            break;
+        case EXPR_LIST:
+            for (size_t i = 0; i < expr->as.list.count; ++i) {
+                free_expr(expr->as.list.elements[i]);
+            }
+            free(expr->as.list.elements);
+            break;
+        case EXPR_RECORD:
+            for (size_t i = 0; i < expr->as.record.count; ++i) {
+                free(expr->as.record.keys[i]);
+                free_expr(expr->as.record.values[i]);
+            }
+            free(expr->as.record.keys);
+            free(expr->as.record.values);
+            break;
+        case EXPR_INDEX:
+            free_expr(expr->as.index.collection);
+            free_expr(expr->as.index.index);
             break;
     }
     free(expr);
@@ -2222,6 +2694,9 @@ static void free_stmt(Stmt *stmt) {
             break;
         case STMT_HALT:
             free_expr(stmt->as.halt.value);
+            break;
+        case STMT_BREAK:
+        case STMT_CONTINUE:
             break;
     }
     free(stmt);
