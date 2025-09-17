@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - `src/` holds the C interpreter core (lexer, parser, runtime, library loader). Pairing headers live in `include/`.
-- `libs/` stores Liesel-standard libraries (`io.ls`, `math.ls`, helpers) that the loader imports at runtime.
+- `libs/` stores Liesel-standard libraries (`io.ls`, `math.ls`, `list.ls`, `record.ls`, `time.ls`) that the loader imports at runtime.
 - `examples/` demonstrates language features and intentional failure cases; use these as smoke tests.
 - `docs/` provides reference material (`spec.md`, `syntax-sheet.md`) that must stay in sync with implementation changes.
 

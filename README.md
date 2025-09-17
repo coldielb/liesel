@@ -28,7 +28,7 @@ Liesel is a hand-crafted, interpreted language with a lyrical or poetic syntax. 
 
 ## Language Primer
 
-- Modules: Use `gather io` (or any library name) at the top of your file. The interpreter searches `./libs`, the current script’s directory lineage, the install directory, and `$LIESEL_HOME`.
+- Modules: Use `gather io` (or any library name) at the top of your file. The interpreter searches `./libs`, the current script’s directory lineage, the install directory, and `$LIESEL_HOME`. Bundled helpers include `time` (timestamps, sleeping), `list`, `record`, and `math`.
 - Definitions: Declare routines with `note name(args):` and return with `halt value`. Variables are introduced with `let` and reassigned via `set`.
 - Control Flow: `if`/`otherwise`, `whilst`, `break`, and `continue` follow indentation-driven blocks. `halt` exits the current routine.
 - Data: Numbers, strings, booleans, `nothing`, lists (`[...]`), and records (`{ key be value }`) are first-class. Index with `seq[index]` or `record["key"]`.
@@ -37,13 +37,13 @@ Liesel is a hand-crafted, interpreted language with a lyrical or poetic syntax. 
 ## Repository Layout
 
 - `src/`, `include/`: C sources and headers for the interpreter runtime.
-- `libs/`: Standard library modules (`io`, `math`, `list`, `record`) authored in Liesel.
+- `libs/`: Standard library modules (`io`, `math`, `list`, `record`, `time`) authored in Liesel.
 - `docs/`: Reference material (`spec.md`, `syntax-sheet.md`).
-- `examples/`: Working programs (`hello.ls`, `grand-tour.ls`, `fibonacci.ls`, etc.) plus intentional failure cases.
+- `examples/`: Working programs (`hello.ls`, `grand-tour.ls`, `fibonacci.ls`, `time-demo.ls`, etc.) plus intentional failure cases.
 
 ## Contributing
 
 - Update `docs/spec.md` when language behavior changes.
 - Pair new features or bug fixes with illustrative scripts under `examples/`.
 
-Enjoy exploring Liesel’s and don’t hesitate to extend its library ecosystem with your own modules.
+Enjoy exploring Liesel’s gentle flow and don’t hesitate to extend its library ecosystem with your own modules.

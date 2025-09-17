@@ -11,11 +11,14 @@
 #include <string.h>
 #include <sys/types.h>
 #include <limits.h>
+#include <time.h>
 #if defined(_WIN32)
+#include <windows.h>
 #include <direct.h>
 #define getcwd _getcwd
 #else
 #include <unistd.h>
+#include <sys/time.h>
 #endif
 
 #ifndef PATH_MAX
@@ -181,6 +184,79 @@ static char *path_dirname_copy(const char *path) {
     memcpy(result, path, parent_len);
     result[parent_len] = '\0';
     return result;
+}
+
+static double clock_unix_seconds(void) {
+#if defined(_WIN32)
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    const unsigned long long EPOCH_DIFF = 116444736000000000ULL;
+    unsigned long long ticks = uli.QuadPart;
+    if (ticks < EPOCH_DIFF) {
+        return 0.0;
+    }
+    return (double)(ticks - EPOCH_DIFF) / 10000000.0;
+#else
+#if defined(CLOCK_REALTIME)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+    }
+#endif
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+#endif
+}
+
+static double clock_unix_millis(void) {
+    return clock_unix_seconds() * 1000.0;
+}
+
+static void sleep_seconds_native(double seconds) {
+    if (seconds <= 0.0) {
+        return;
+    }
+#if defined(_WIN32)
+    double millis = seconds * 1000.0;
+    if (millis > (double)UINT_MAX) {
+        millis = (double)UINT_MAX;
+    }
+    Sleep((DWORD)millis);
+#else
+    struct timespec req;
+    req.tv_sec = (time_t)seconds;
+    double fractional = seconds - (double)req.tv_sec;
+    if (fractional < 0) {
+        fractional = 0;
+    }
+    req.tv_nsec = (long)(fractional * 1e9);
+    nanosleep(&req, NULL);
+#endif
+}
+
+static void sleep_millis_native(double millis) {
+    if (millis <= 0.0) {
+        return;
+    }
+#if defined(_WIN32)
+    if (millis > (double)UINT_MAX) {
+        millis = (double)UINT_MAX;
+    }
+    Sleep((DWORD)millis);
+#else
+    struct timespec req;
+    req.tv_sec = (time_t)(millis / 1000.0);
+    double fractional = (millis / 1000.0) - (double)req.tv_sec;
+    if (fractional < 0) {
+        fractional = 0;
+    }
+    req.tv_nsec = (long)(fractional * 1e9);
+    nanosleep(&req, NULL);
+#endif
 }
 
 /* ========================= LEXER ========================= */
@@ -2160,6 +2236,104 @@ static Value native_core_write_line(Interpreter *interp, int arg_count, Value *a
     return value_nothing();
 }
 
+static Value native_core_clock_unix_seconds(Interpreter *interp, int arg_count, Value *args, int line) {
+    UNUSED(args);
+    if (arg_count != 0) {
+        runtime_error(interp, line, "core::clock_unix_seconds expects no arguments",
+                      "Call core::clock_unix_seconds() without parameters.");
+        return value_nothing();
+    }
+    return value_number(clock_unix_seconds());
+}
+
+static Value native_core_clock_unix_millis(Interpreter *interp, int arg_count, Value *args, int line) {
+    UNUSED(args);
+    if (arg_count != 0) {
+        runtime_error(interp, line, "core::clock_unix_millis expects no arguments",
+                      "Call core::clock_unix_millis() without parameters.");
+        return value_nothing();
+    }
+    return value_number(clock_unix_millis());
+}
+
+static Value native_core_sleep_seconds(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1 || args[0].type != VALUE_NUMBER) {
+        runtime_error(interp, line, "core::sleep_seconds expects a numeric duration",
+                      "Provide the number of seconds to pause, e.g. core::sleep_seconds(0.5).");
+        return value_nothing();
+    }
+    double seconds = args[0].as.number;
+    if (seconds < 0.0) {
+        runtime_error(interp, line, "core::sleep_seconds cannot accept negative durations",
+                      "Use a non-negative number of seconds.");
+        return value_nothing();
+    }
+    sleep_seconds_native(seconds);
+    return value_nothing();
+}
+
+static Value native_core_sleep_millis(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 1 || args[0].type != VALUE_NUMBER) {
+        runtime_error(interp, line, "core::sleep_millis expects a numeric duration",
+                      "Provide the number of milliseconds to pause, e.g. core::sleep_millis(250).");
+        return value_nothing();
+    }
+    double millis = args[0].as.number;
+    if (millis < 0.0) {
+        runtime_error(interp, line, "core::sleep_millis cannot accept negative durations",
+                      "Use a non-negative number of milliseconds.");
+        return value_nothing();
+    }
+    sleep_millis_native(millis);
+    return value_nothing();
+}
+
+static Value native_core_time_format_local(Interpreter *interp, int arg_count, Value *args, int line) {
+    if (arg_count != 2) {
+        runtime_error(interp, line, "core::time_format_local expects a timestamp and pattern",
+                      "Call core::time_format_local(seconds, \"%Y-%m-%d\").");
+        return value_nothing();
+    }
+    if (args[0].type != VALUE_NUMBER) {
+        runtime_error(interp, line, "core::time_format_local requires the first argument to be a number",
+                      "Pass the timestamp returned by core::clock_unix_seconds().");
+        return value_nothing();
+    }
+    if (args[1].type != VALUE_STRING) {
+        runtime_error(interp, line, "core::time_format_local requires a format string",
+                      "Provide a pattern such as \"%Y-%m-%d %H:%M:%S\".");
+        return value_nothing();
+    }
+
+    double seconds = args[0].as.number;
+    const char *pattern = args[1].as.string;
+    time_t raw = (time_t)seconds;
+    struct tm tm_info;
+#if defined(_WIN32)
+    if (localtime_s(&tm_info, &raw) != 0) {
+        runtime_error(interp, line, "Failed to convert timestamp to local time",
+                      "Ensure the timestamp is within the supported range.");
+        return value_nothing();
+    }
+#else
+    if (localtime_r(&raw, &tm_info) == NULL) {
+        runtime_error(interp, line, "Failed to convert timestamp to local time",
+                      "Ensure the timestamp is within the supported range.");
+        return value_nothing();
+    }
+#endif
+
+    char buffer[256];
+    size_t written = strftime(buffer, sizeof(buffer), pattern, &tm_info);
+    if (written == 0) {
+        runtime_error(interp, line, "core::time_format_local could not apply the format pattern",
+                      "Check that the pattern uses valid strftime tokens and produces output under 256 characters.");
+        return value_nothing();
+    }
+    buffer[written] = '\0';
+    return value_string(buffer);
+}
+
 static Value native_core_length(Interpreter *interp, int arg_count, Value *args, int line) {
     if (arg_count != 1) {
         runtime_error(interp, line, "core::length expects exactly 1 argument",
@@ -2365,6 +2539,26 @@ static bool load_native_module(Interpreter *interp, const char *name) {
         Value parse_boolean = value_native(native_core_parse_boolean, "core::parse_boolean");
         environment_define(interp->globals, "core::parse_boolean", parse_boolean);
         value_free(parse_boolean);
+
+        Value clock_seconds = value_native(native_core_clock_unix_seconds, "core::clock_unix_seconds");
+        environment_define(interp->globals, "core::clock_unix_seconds", clock_seconds);
+        value_free(clock_seconds);
+
+        Value clock_millis = value_native(native_core_clock_unix_millis, "core::clock_unix_millis");
+        environment_define(interp->globals, "core::clock_unix_millis", clock_millis);
+        value_free(clock_millis);
+
+        Value sleep_seconds_fn = value_native(native_core_sleep_seconds, "core::sleep_seconds");
+        environment_define(interp->globals, "core::sleep_seconds", sleep_seconds_fn);
+        value_free(sleep_seconds_fn);
+
+        Value sleep_millis_fn = value_native(native_core_sleep_millis, "core::sleep_millis");
+        environment_define(interp->globals, "core::sleep_millis", sleep_millis_fn);
+        value_free(sleep_millis_fn);
+
+        Value format_local_fn = value_native(native_core_time_format_local, "core::time_format_local");
+        environment_define(interp->globals, "core::time_format_local", format_local_fn);
+        value_free(format_local_fn);
 
         return true;
     }
