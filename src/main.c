@@ -108,6 +108,9 @@ static void print_help(const char *name) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     if (argc >= 1 && argv[0] != NULL) {
         register_default_module_paths(argv[0]);
     }
